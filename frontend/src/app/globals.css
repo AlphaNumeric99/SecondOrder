@@ -1,0 +1,220 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+:root {
+  --background: #09090b;
+  --foreground: #fafafa;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans), Arial, Helvetica, sans-serif;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #3f3f46;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #52525b;
+}
+
+/* GitHub-style dark markdown */
+.markdown-body {
+  color: #e6edf3;
+  line-height: 1.7;
+  word-wrap: break-word;
+}
+
+.markdown-body h1 {
+  font-size: 1.75em;
+  font-weight: 700;
+  margin-top: 1.5em;
+  margin-bottom: 0.75em;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid #30363d;
+  color: #f0f6fc;
+}
+
+.markdown-body h2 {
+  font-size: 1.4em;
+  font-weight: 600;
+  margin-top: 1.5em;
+  margin-bottom: 0.625em;
+  padding-bottom: 0.25em;
+  border-bottom: 1px solid #30363d;
+  color: #f0f6fc;
+}
+
+.markdown-body h3 {
+  font-size: 1.15em;
+  font-weight: 600;
+  margin-top: 1.25em;
+  margin-bottom: 0.5em;
+  color: #f0f6fc;
+}
+
+.markdown-body h4, .markdown-body h5, .markdown-body h6 {
+  font-size: 1em;
+  font-weight: 600;
+  margin-top: 1.25em;
+  margin-bottom: 0.5em;
+  color: #f0f6fc;
+}
+
+.markdown-body p {
+  margin-top: 0;
+  margin-bottom: 1em;
+}
+
+.markdown-body a {
+  color: #58a6ff;
+  text-decoration: none;
+}
+
+.markdown-body a:hover {
+  text-decoration: underline;
+}
+
+.markdown-body strong {
+  color: #f0f6fc;
+  font-weight: 600;
+}
+
+.markdown-body em {
+  font-style: italic;
+}
+
+.markdown-body ul, .markdown-body ol {
+  margin-top: 0;
+  margin-bottom: 1em;
+  padding-left: 2em;
+}
+
+.markdown-body ul {
+  list-style-type: disc;
+}
+
+.markdown-body ol {
+  list-style-type: decimal;
+}
+
+.markdown-body li {
+  margin-top: 0.25em;
+  margin-bottom: 0.25em;
+}
+
+.markdown-body li + li {
+  margin-top: 0.25em;
+}
+
+.markdown-body blockquote {
+  margin: 0.5em 0 1em;
+  padding: 0.5em 1em;
+  border-left: 3px solid #3b82f6;
+  background: #161b22;
+  color: #8b949e;
+  border-radius: 0 6px 6px 0;
+}
+
+.markdown-body blockquote p:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body code {
+  padding: 0.2em 0.4em;
+  font-size: 85%;
+  background: #1e293b;
+  border-radius: 6px;
+  font-family: var(--font-mono), 'Fira Code', 'Cascadia Code', Consolas, monospace;
+  color: #e2e8f0;
+}
+
+.markdown-body pre {
+  margin-top: 0.5em;
+  margin-bottom: 1em;
+  padding: 1em;
+  overflow-x: auto;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  line-height: 1.5;
+}
+
+.markdown-body pre code {
+  padding: 0;
+  background: transparent;
+  border-radius: 0;
+  font-size: 85%;
+  color: #e6edf3;
+}
+
+.markdown-body table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 0.5em;
+  margin-bottom: 1em;
+  overflow: auto;
+}
+
+.markdown-body table th {
+  font-weight: 600;
+  padding: 0.5em 0.75em;
+  border: 1px solid #30363d;
+  background: #161b22;
+  color: #f0f6fc;
+  text-align: left;
+}
+
+.markdown-body table td {
+  padding: 0.5em 0.75em;
+  border: 1px solid #30363d;
+}
+
+.markdown-body table tr:nth-child(even) {
+  background: rgba(22, 27, 34, 0.5);
+}
+
+.markdown-body hr {
+  margin: 1.5em 0;
+  border: 0;
+  border-top: 1px solid #30363d;
+}
+
+.markdown-body img {
+  max-width: 100%;
+  border-radius: 8px;
+}
+
+/* Syntax highlighting (hljs dark) */
+.hljs {
+  color: #e6edf3;
+  background: #0d1117;
+}
+.hljs-keyword, .hljs-selector-tag { color: #ff7b72; }
+.hljs-string, .hljs-attr { color: #a5d6ff; }
+.hljs-number, .hljs-literal { color: #79c0ff; }
+.hljs-comment { color: #8b949e; font-style: italic; }
+.hljs-built_in { color: #ffa657; }
+.hljs-function .hljs-title { color: #d2a8ff; }
+.hljs-type, .hljs-class .hljs-title { color: #ffa657; }
+.hljs-variable { color: #ffa657; }
+.hljs-meta { color: #79c0ff; }
