@@ -4,9 +4,8 @@ import json
 import time
 from typing import Any, AsyncGenerator
 
-import anthropic
-
 from app.config import settings
+from app.llm_client import client, get_model
 from app.models.events import SSEEvent
 from app.services import supabase as db
 
@@ -23,9 +22,9 @@ class BaseAgent:
     tools: list[dict[str, Any]] = []
 
     def __init__(self, model: str | None = None, session_id: str | None = None):
-        self.model = model or settings.default_model
+        self.model = model or get_model()
         self.session_id = session_id
-        self.client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        self.client = client()
 
     async def handle_tool_call(
         self, tool_name: str, tool_input: dict[str, Any]

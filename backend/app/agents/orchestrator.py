@@ -7,12 +7,11 @@ from datetime import date
 from typing import Any, AsyncGenerator
 from uuid import UUID
 
-import anthropic
-
 from app.agents.analyzer_agent import AnalyzerAgent
 from app.agents.search_agent import SearchAgent
 from app.agents.scraper_agent import ScraperAgent
 from app.config import settings
+from app.llm_client import client, get_model
 from app.models.events import SSEEvent
 from app.services import streaming
 from app.services import supabase as db
@@ -34,9 +33,9 @@ class ResearchOrchestrator:
     """
 
     def __init__(self, model: str | None = None, session_id: str | None = None):
-        self.model = model or settings.default_model
+        self.model = model or get_model()
         self.session_id = session_id
-        self.client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        self.client = client()
 
     async def _log_call(self, caller: str, response: Any, elapsed_ms: int) -> None:
         """Log an LLM call to the database. Silently ignores errors."""

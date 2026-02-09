@@ -36,14 +36,14 @@ Every step streams progress to the UI — you see the plan form, searches execut
 
 ## Architecture
 
-- **Backend**: Python + FastAPI, raw asyncio orchestration with Anthropic SDK
+- **Backend**: Python + FastAPI, raw asyncio orchestration with Anthropic SDK (or OpenRouter)
 - **Frontend**: Next.js 16, React 19, Tailwind CSS 4
 - **Database**: Supabase (PostgreSQL) for sessions, messages, research steps, and LLM call logging
 - **Search**: Tavily API
 - **Scraping**: Hasdata API
-- **Models**: Claude Opus 4.6 / Sonnet 4.5 / Haiku 4.5 (user-selectable)
+- **Models**: Claude Opus 4.6 / Sonnet 4.5 / Haiku 4.5 (user-selectable, via Anthropic or OpenRouter)
 
-No agent frameworks. No LangChain. No LlamaIndex. Just Python, asyncio, and the Anthropic SDK — maximum control, zero lock-in.
+No agent frameworks. No LangChain. No LlamaIndex. Just Python, asyncio, and the Anthropic SDK — maximum control, zero lock-in. Optionally routes through OpenRouter for multi-model support.
 
 ## Quick Start
 
@@ -51,8 +51,30 @@ No agent frameworks. No LangChain. No LlamaIndex. Just Python, asyncio, and the 
 
 - Python 3.11+ (with uv)
 - Node.js 18+
-- API keys: Anthropic, Tavily, Hasdata
+- API keys: Anthropic (or OpenRouter), Tavily, Hasdata
 - Supabase project
+
+### LLM Provider Configuration
+
+By default, SecondOrder uses Anthropic's Claude models. To use any model via OpenRouter:
+
+```bash
+# backend/.env
+OPENROUTER_API_KEY=sk-or-...
+OPENROUTER_MODEL=openai/gpt-4        # or any other OpenRouter model
+```
+
+Available model examples:
+- `openai/gpt-4` — OpenAI's GPT-4
+- `openai/gpt-3.5-turbo` — OpenAI's GPT-3.5
+- `anthropic/claude-3-opus` — Anthropic's Claude 3 Opus (via OpenRouter)
+- `google/gemini-pro` — Google's Gemini Pro
+- `meta-llama/llama-2-70b-chat` — Llama 2
+- ... and many more
+
+Check [openrouter.io/models](https://openrouter.io/models) for the full list and current pricing.
+
+To revert to Anthropic's direct API, leave `OPENROUTER_MODEL` blank.
 
 ### Backend
 

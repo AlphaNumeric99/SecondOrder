@@ -6,6 +6,10 @@ class Settings(BaseSettings):
     anthropic_api_key: str
     default_model: str = "claude-sonnet-4-5-20250929"
 
+    # OpenRouter (optional, for any model)
+    openrouter_api_key: str = ""
+    openrouter_model: str = ""  # e.g., "openai/gpt-4", "anthropic/claude-3-opus"
+
     # Tavily
     tavily_api_key: str
 

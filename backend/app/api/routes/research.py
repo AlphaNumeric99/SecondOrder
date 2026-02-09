@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 from sse_starlette.sse import EventSourceResponse
 
 from app.agents.orchestrator import ResearchOrchestrator
+from app.llm_client import get_model
 from app.models.schemas import ResearchRequest, ResearchStartResponse
 from app.services import supabase as db
 
@@ -46,7 +47,7 @@ async def stream_research(session_id: UUID):
         raise HTTPException(status_code=400, detail="No research query found")
 
     query = user_messages[-1]["content"]
-    model = session.get("model", "claude-sonnet-4-5-20250929")
+    model = session.get("model") or get_model()
 
     async def event_generator():
         import json as _json
