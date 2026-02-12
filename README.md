@@ -26,7 +26,7 @@ You ask a question
   [Scraper Agents] — extracts full content from top sources via Hasdata
        |
        v
-  [Analyzer] — Claude synthesizes everything into a cited report
+  [Analyzer] — configured OpenRouter model synthesizes everything into a cited report
        |
        v
   Streamed to you in real time via SSE
@@ -36,14 +36,14 @@ Every step streams progress to the UI — you see the plan form, searches execut
 
 ## Architecture
 
-- **Backend**: Python + FastAPI, raw asyncio orchestration with Anthropic SDK (or OpenRouter)
+- **Backend**: Python + FastAPI, raw asyncio orchestration with OpenRouter (OpenAI-compatible SDK client)
 - **Frontend**: Next.js 16, React 19, Tailwind CSS 4
 - **Database**: Supabase (PostgreSQL) for sessions, messages, research steps, and LLM call logging
 - **Search**: Tavily API
 - **Scraping**: Hasdata API
-- **Models**: Claude Opus 4.6 / Sonnet 4.5 / Haiku 4.5 (user-selectable, via Anthropic or OpenRouter)
+- **Models**: OpenRouter model IDs (user-selectable, e.g., GPT, Gemini, Llama families)
 
-No agent frameworks. No LangChain. No LlamaIndex. Just Python, asyncio, and the Anthropic SDK — maximum control, zero lock-in. Optionally routes through OpenRouter for multi-model support.
+No agent frameworks. No LangChain. No LlamaIndex. Just Python, asyncio, and OpenRouter-compatible SDK calls.
 
 ## Quick Start
 
@@ -51,30 +51,28 @@ No agent frameworks. No LangChain. No LlamaIndex. Just Python, asyncio, and the 
 
 - Python 3.11+ (with uv)
 - Node.js 18+
-- API keys: Anthropic (or OpenRouter), Tavily, Hasdata
+- API keys: OpenRouter, Tavily, Hasdata
 - Supabase project
 
-### LLM Provider Configuration
+### LLM Configuration (OpenRouter)
 
-By default, SecondOrder uses Anthropic's Claude models. To use any model via OpenRouter:
+SecondOrder is OpenRouter-only. Configure your key and default model:
 
 ```bash
 # backend/.env
 OPENROUTER_API_KEY=sk-or-...
-OPENROUTER_MODEL=openai/gpt-4        # or any other OpenRouter model
+DEFAULT_MODEL=openai/gpt-4o-mini
+OPENROUTER_MODEL=                     # optional per-env override
 ```
 
 Available model examples:
-- `openai/gpt-4` — OpenAI's GPT-4
-- `openai/gpt-3.5-turbo` — OpenAI's GPT-3.5
-- `anthropic/claude-3-opus` — Anthropic's Claude 3 Opus (via OpenRouter)
-- `google/gemini-pro` — Google's Gemini Pro
-- `meta-llama/llama-2-70b-chat` — Llama 2
+- `openai/gpt-4.1` — OpenAI GPT-4.1
+- `openai/gpt-4o-mini` — OpenAI GPT-4o Mini
+- `google/gemini-2.0-flash-001` — Google Gemini 2.0 Flash
+- `meta-llama/llama-3.3-70b-instruct` — Llama 3.3 70B Instruct
 - ... and many more
 
 Check [openrouter.io/models](https://openrouter.io/models) for the full list and current pricing.
-
-To revert to Anthropic's direct API, leave `OPENROUTER_MODEL` blank.
 
 ### Backend
 

@@ -2,13 +2,11 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    # Anthropic
-    anthropic_api_key: str
-    default_model: str = "claude-sonnet-4-5-20250929"
-
-    # OpenRouter (optional, for any model)
-    openrouter_api_key: str = ""
-    openrouter_model: str = ""  # e.g., "openai/gpt-4", "anthropic/claude-3-opus"
+    # OpenRouter (required)
+    openrouter_api_key: str
+    default_model: str = "openai/gpt-4o-mini"
+    openrouter_model: str = ""  # Optional override for default_model
+    benchmark_judge_model: str = "openai/gpt-4o-mini"
 
     # Tavily
     tavily_api_key: str
@@ -23,7 +21,11 @@ class Settings(BaseSettings):
     # App
     cors_origins: str = "http://localhost:3000"
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "extra": "ignore",
+    }
 
     @property
     def cors_origin_list(self) -> list[str]:

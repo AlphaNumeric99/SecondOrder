@@ -11,14 +11,15 @@ class TestOrchestratorPlan:
     @pytest.mark.asyncio
     async def test_generate_plan_parses_json(self):
         with patch("app.config.settings") as mock_settings:
-            mock_settings.anthropic_api_key = "test"
-            mock_settings.default_model = "claude-sonnet-4-5-20250929"
+            mock_settings.openrouter_api_key = "test"
+            mock_settings.openrouter_model = ""
+            mock_settings.default_model = "openai/gpt-4o-mini"
 
             from app.agents.orchestrator import ResearchOrchestrator
 
             orchestrator = ResearchOrchestrator()
 
-            # Mock the Anthropic client
+            # Mock the OpenRouter-backed client
             mock_response = MagicMock()
             mock_content = MagicMock()
             mock_content.text = '["query 1", "query 2", "query 3"]'
@@ -33,8 +34,9 @@ class TestOrchestratorPlan:
     @pytest.mark.asyncio
     async def test_generate_plan_fallback(self):
         with patch("app.config.settings") as mock_settings:
-            mock_settings.anthropic_api_key = "test"
-            mock_settings.default_model = "claude-sonnet-4-5-20250929"
+            mock_settings.openrouter_api_key = "test"
+            mock_settings.openrouter_model = ""
+            mock_settings.default_model = "openai/gpt-4o-mini"
 
             from app.agents.orchestrator import ResearchOrchestrator
 
@@ -57,8 +59,9 @@ class TestURLSelection:
     @pytest.mark.asyncio
     async def test_select_top_urls_deduplicates(self):
         with patch("app.config.settings") as mock_settings:
-            mock_settings.anthropic_api_key = "test"
-            mock_settings.default_model = "claude-sonnet-4-5-20250929"
+            mock_settings.openrouter_api_key = "test"
+            mock_settings.openrouter_model = ""
+            mock_settings.default_model = "openai/gpt-4o-mini"
 
             from app.agents.orchestrator import ResearchOrchestrator
 

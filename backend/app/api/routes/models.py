@@ -10,6 +10,6 @@ router = APIRouter(prefix="/api/models", tags=["models"])
 
 @router.get("", response_model=ModelsResponse)
 async def list_models():
-    """List available Claude models for research."""
+    """List curated OpenRouter models for research."""
     models = get_available_models()
     return ModelsResponse(models=[ModelInfo(**m) for m in models])

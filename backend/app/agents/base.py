@@ -5,13 +5,13 @@ import time
 from typing import Any, AsyncGenerator
 
 from app.config import settings
-from app.llm_client import client, get_model
+from app.llm_client import client as llm_client, get_model
 from app.models.events import SSEEvent
 from app.services import supabase as db
 
 
 class BaseAgent:
-    """Base agent that wraps the Anthropic SDK tool-use loop.
+    """Base agent that wraps the OpenRouter tool-use loop.
 
     Subclasses define `system_prompt`, `tools`, and `handle_tool_call`.
     The `run` method is an async generator that yields SSEEvents as the agent works.
@@ -24,7 +24,7 @@ class BaseAgent:
     def __init__(self, model: str | None = None, session_id: str | None = None):
         self.model = model or get_model()
         self.session_id = session_id
-        self.client = client()
+        self.client = None
 
     async def handle_tool_call(
         self, tool_name: str, tool_input: dict[str, Any]
@@ -55,6 +55,7 @@ class BaseAgent:
         messages.append({"role": "user", "content": user_message})
 
         for _ in range(max_turns):
+            active_client = self.client or llm_client()
             kwargs: dict[str, Any] = {
                 "model": self.model,
                 "max_tokens": 8192,
@@ -65,12 +66,14 @@ class BaseAgent:
                 kwargs["tools"] = self.tools
 
             t0 = time.monotonic()
-            response = await self.client.messages.create(**kwargs)
+            response = await active_client.messages.create(**kwargs)
             elapsed_ms = int((time.monotonic() - t0) * 1000)
 
             # Log the LLM call
             try:
                 from uuid import UUID
+                from app.services import logger as log_service
+
                 usage = response.usage
                 await db.log_llm_call(
                     model=self.model,
@@ -80,8 +83,21 @@ class BaseAgent:
                     duration_ms=elapsed_ms,
                     session_id=UUID(self.session_id) if self.session_id else None,
                 )
-            except Exception:
-                pass  # Don't let logging break the agent
+                # Also log to file for debugging
+                log_service.log_llm_call(
+                    model=self.model,
+                    caller=self.name,
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    duration_ms=elapsed_ms,
+                )
+            except Exception as e:
+                log_service.log_event(
+                    event_type="logging_error",
+                    message=f"Failed to log LLM call in {self.name}",
+                    error=str(e),
+                    model=self.model,
+                )
 
             # Check if the response contains tool use
             tool_use_blocks = [b for b in response.content if b.type == "tool_use"]

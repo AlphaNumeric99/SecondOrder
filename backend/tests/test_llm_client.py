@@ -1,128 +1,58 @@
-"""Tests for LLM client factory (Anthropic vs OpenRouter)."""
-import pytest
-from unittest.mock import patch, MagicMock
+"""Tests for OpenRouter-only LLM client factory."""
+import sys
+import types
+from unittest.mock import MagicMock, patch
+
 from app.llm_client import get_client, get_model
 
 
 class TestGetModel:
     """Test model selection logic."""
 
-    def test_get_model_returns_default_when_no_openrouter(self):
-        """When OpenRouter is not configured, return default Anthropic model."""
+    def test_get_model_returns_default_when_no_override(self):
         with patch("app.llm_client.settings") as mock_settings:
             mock_settings.openrouter_model = ""
-            mock_settings.openrouter_api_key = ""
-            mock_settings.default_model = "claude-sonnet-4-5-20250929"
+            mock_settings.default_model = "openai/gpt-4o-mini"
 
-            result = get_model()
-            assert result == "claude-sonnet-4-5-20250929"
+            assert get_model() == "openai/gpt-4o-mini"
 
-    def test_get_model_returns_openrouter_when_configured(self):
-        """When OpenRouter is configured, return OpenRouter model ID."""
+    def test_get_model_returns_openrouter_override(self):
         with patch("app.llm_client.settings") as mock_settings:
-            mock_settings.openrouter_model = "openai/gpt-4"
-            mock_settings.openrouter_api_key = "sk-or-valid-key"
-            mock_settings.default_model = "claude-sonnet-4-5-20250929"
+            mock_settings.openrouter_model = "openai/gpt-4.1"
+            mock_settings.default_model = "openai/gpt-4o-mini"
 
-            result = get_model()
-            assert result == "openai/gpt-4"
-
-    def test_get_model_ignores_openrouter_model_without_api_key(self):
-        """If OpenRouter model is set but API key is missing, use default."""
-        with patch("app.llm_client.settings") as mock_settings:
-            mock_settings.openrouter_model = "openai/gpt-4"
-            mock_settings.openrouter_api_key = ""
-            mock_settings.default_model = "claude-sonnet-4-5-20250929"
-
-            result = get_model()
-            assert result == "claude-sonnet-4-5-20250929"
-
-    def test_get_model_ignores_openrouter_api_key_without_model(self):
-        """If API key is set but OpenRouter model is missing, use default."""
-        with patch("app.llm_client.settings") as mock_settings:
-            mock_settings.openrouter_model = ""
-            mock_settings.openrouter_api_key = "sk-or-valid-key"
-            mock_settings.default_model = "claude-sonnet-4-5-20250929"
-
-            result = get_model()
-            assert result == "claude-sonnet-4-5-20250929"
+            assert get_model() == "openai/gpt-4.1"
 
     def test_get_model_supports_various_openrouter_models(self):
-        """OpenRouter model selection works with different model IDs."""
         model_ids = [
-            "openai/gpt-4",
-            "openai/gpt-3.5-turbo",
-            "anthropic/claude-3-opus",
-            "google/gemini-pro",
-            "meta-llama/llama-2-70b-chat",
+            "openai/gpt-4.1",
+            "openai/gpt-4o-mini",
+            "google/gemini-2.0-flash-001",
+            "meta-llama/llama-3.3-70b-instruct",
         ]
 
         for model_id in model_ids:
             with patch("app.llm_client.settings") as mock_settings:
                 mock_settings.openrouter_model = model_id
-                mock_settings.openrouter_api_key = "sk-or-valid-key"
-                mock_settings.default_model = "claude-sonnet-4-5-20250929"
-
-                result = get_model()
-                assert result == model_id
+                mock_settings.default_model = "openai/gpt-4o-mini"
+                assert get_model() == model_id
 
 
 class TestGetClient:
-    """Test client initialization logic."""
+    """Test OpenRouter client initialization."""
 
-    def test_get_client_returns_anthropic_by_default(self):
-        """Without OpenRouter config, return Anthropic AsyncAnthropic client."""
+    def test_get_client_uses_openrouter(self):
         with patch("app.llm_client.settings") as mock_settings:
-            mock_settings.openrouter_model = ""
-            mock_settings.openrouter_api_key = ""
-            mock_settings.anthropic_api_key = "sk-ant-test-key"
-
-            with patch("anthropic.AsyncAnthropic") as mock_anthropic:
-                get_client()
-                # Verify called with Anthropic API key, no base_url override
-                mock_anthropic.assert_called_once_with(api_key="sk-ant-test-key")
-
-    def test_get_client_returns_openrouter_when_configured(self):
-        """With OpenRouter config, return client pointing to OpenRouter base_url."""
-        with patch("app.llm_client.settings") as mock_settings:
-            mock_settings.openrouter_model = "openai/gpt-4"
             mock_settings.openrouter_api_key = "sk-or-valid-key"
-            mock_settings.anthropic_api_key = "sk-ant-test-key"
 
-            with patch("anthropic.AsyncAnthropic") as mock_anthropic:
+            openai_module = types.ModuleType("openai")
+            mock_openai = MagicMock()
+            openai_module.AsyncOpenAI = mock_openai
+
+            with patch.dict(sys.modules, {"openai": openai_module}):
                 get_client()
-                # Verify called with OpenRouter API key and base_url
-                mock_anthropic.assert_called_once_with(
-                    api_key="sk-or-valid-key",
-                    base_url="https://openrouter.io/api/v1",
-                )
 
-    def test_get_client_ignores_openrouter_without_both_settings(self):
-        """If either OpenRouter setting is missing, fall back to Anthropic."""
-        test_cases = [
-            ("openai/gpt-4", ""),  # Model but no key
-            ("", "sk-or-valid-key"),  # Key but no model
-        ]
-
-        for model, key in test_cases:
-            with patch("app.llm_client.settings") as mock_settings:
-                mock_settings.openrouter_model = model
-                mock_settings.openrouter_api_key = key
-                mock_settings.anthropic_api_key = "sk-ant-test-key"
-
-                with patch("anthropic.AsyncAnthropic") as mock_anthropic:
-                    get_client()
-                    # Should always use Anthropic API key, no base_url
-                    mock_anthropic.assert_called_once_with(api_key="sk-ant-test-key")
-
-    def test_get_client_uses_openrouter_base_url_correctly(self):
-        """OpenRouter client uses correct API endpoint."""
-        with patch("app.llm_client.settings") as mock_settings:
-            mock_settings.openrouter_model = "anthropic/claude-3-opus"
-            mock_settings.openrouter_api_key = "sk-or-test-key"
-            mock_settings.anthropic_api_key = "sk-ant-test-key"
-
-            with patch("anthropic.AsyncAnthropic") as mock_anthropic:
-                get_client()
-                call_kwargs = mock_anthropic.call_args[1]
-                assert call_kwargs["base_url"] == "https://openrouter.io/api/v1"
+            mock_openai.assert_called_once_with(
+                api_key="sk-or-valid-key",
+                base_url="https://openrouter.ai/api/v1",
+            )

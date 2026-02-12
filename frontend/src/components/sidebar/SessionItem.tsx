@@ -28,15 +28,23 @@ export function SessionItem({ session, isActive, onClick, onDelete }: SessionIte
         </p>
         <p className="text-xs text-zinc-500">{formatDate(session.created_at)}</p>
       </div>
-      <button
+      <div
         onClick={(e) => {
           e.stopPropagation();
           onDelete();
         }}
-        className="ml-2 hidden rounded p-1 text-zinc-500 hover:bg-zinc-600 hover:text-zinc-300 group-hover:block"
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.stopPropagation();
+            onDelete();
+          }
+        }}
+        className="ml-2 hidden cursor-pointer rounded p-1 text-zinc-500 hover:bg-zinc-600 hover:text-zinc-300 group-hover:block"
       >
         <Trash2 size={14} />
-      </button>
+      </div>
     </button>
   );
 }

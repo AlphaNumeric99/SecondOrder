@@ -8,7 +8,7 @@ from app.agents.base import BaseAgent
 class AnalyzerAgent(BaseAgent):
     """Agent that synthesizes collected research into a comprehensive report.
 
-    This agent has no tools — it uses Claude's reasoning to analyze and synthesize
+    This agent has no tools — it uses the configured LLM's reasoning to analyze and synthesize
     the provided research data into a well-structured report with citations.
     """
 

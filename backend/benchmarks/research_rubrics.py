@@ -9,9 +9,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-import anthropic
-
 from app.config import settings
+from app.llm_client import get_client
 from benchmarks.base import Benchmark, BenchmarkTask, EvalResult
 
 JUDGE_SYSTEM = """You are an expert research evaluator using the ResearchRubrics methodology.
@@ -103,13 +102,13 @@ class ResearchRubricsBenchmark(Benchmark):
 
     async def evaluate(self, task: BenchmarkTask, response: str) -> EvalResult:
         """Evaluate response against ResearchRubrics criteria."""
-        client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        client = get_client()
 
         rubrics = json.loads(task.reference) if isinstance(task.reference, str) else task.reference
         rubric_text = json.dumps(rubrics, indent=2)[:6000]
 
         judge_response = await client.messages.create(
-            model="claude-sonnet-4-5-20250929",
+            model=settings.benchmark_judge_model,
             max_tokens=4096,
             system=JUDGE_SYSTEM,
             messages=[{

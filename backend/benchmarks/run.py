@@ -1,7 +1,7 @@
 """CLI runner for SecondOrder benchmarks.
 
 Usage:
-  python -m benchmarks.run draco --limit 10 --model claude-sonnet-4-5-20250929
+  python -m benchmarks.run draco --limit 10 --model openai/gpt-4o-mini
   python -m benchmarks.run researchrubrics --limit 5
   python -m benchmarks.run deepsearchqa --limit 20
   python -m benchmarks.run all --limit 5
@@ -46,7 +46,7 @@ async def main():
     parser.add_argument(
         "--model", "-m",
         type=str,
-        default="claude-sonnet-4-5-20250929",
+        default="openai/gpt-4o-mini",
         help="Model to use for research",
     )
     parser.add_argument(

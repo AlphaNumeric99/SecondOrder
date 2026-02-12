@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 class ResearchRequest(BaseModel):
     query: str
-    model: str = "claude-sonnet-4-5-20250929"
+    model: str = "openai/gpt-4o-mini"
 
 
 # --- Responses ---

@@ -124,12 +124,12 @@ class TestLLMCallLogging:
     def test_research_route_respects_model_selection(self):
         """Verify research route uses get_model() as fallback."""
         with patch("app.api.routes.research.get_model") as mock_get_model:
-            mock_get_model.return_value = "claude-sonnet-4-5-20250929"
+            mock_get_model.return_value = "openai/gpt-4o-mini"
 
             from app.api.routes.research import get_model
 
             model = get_model()
-            assert model == "claude-sonnet-4-5-20250929"
+            assert model == "openai/gpt-4o-mini"
 
 
 class TestUIImprovements:
@@ -195,19 +195,17 @@ class TestModelConsistency:
         """Verify fallback chain: request model → session model → env model."""
         with patch("app.llm_client.settings") as mock_settings:
             mock_settings.openrouter_model = ""
-            mock_settings.openrouter_api_key = ""
-            mock_settings.default_model = "claude-opus-4-6"
+            mock_settings.default_model = "openai/gpt-4o-mini"
 
             from app.llm_client import get_model
 
-            assert get_model() == "claude-opus-4-6"
+            assert get_model() == "openai/gpt-4o-mini"
 
     def test_openrouter_model_override(self):
         """Verify OpenRouter model overrides default model."""
         with patch("app.llm_client.settings") as mock_settings:
             mock_settings.openrouter_model = "openai/gpt-4-turbo"
-            mock_settings.openrouter_api_key = "sk-or-key"
-            mock_settings.default_model = "claude-opus-4-6"
+            mock_settings.default_model = "openai/gpt-4o-mini"
 
             from app.llm_client import get_model
 
@@ -216,12 +214,12 @@ class TestModelConsistency:
     def test_model_selection_doesnt_affect_search_agent(self):
         """Verify SearchAgent uses selected model via BaseAgent."""
         with patch("app.agents.base.get_model") as mock_get_model:
-            mock_get_model.return_value = "anthropic/claude-3-opus"
+            mock_get_model.return_value = "openai/gpt-4.1"
 
             from app.agents.search_agent import SearchAgent
 
             agent = SearchAgent(model=None)
-            assert agent.model == "anthropic/claude-3-opus"
+            assert agent.model == "openai/gpt-4.1"
 
     def test_model_selection_doesnt_affect_scraper_agent(self):
         """Verify ScraperAgent uses selected model via BaseAgent."""

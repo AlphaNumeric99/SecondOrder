@@ -40,3 +40,8 @@ BUGS.md
 # Misc
 *.log
 *.tmp
+*.sh
+*.bat
+
+# Codex workspace
+.codex/

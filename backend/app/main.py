@@ -16,7 +16,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="SecondOrder",
-    description="Deep Research Tool powered by Anthropic Claude",
+    description="Deep Research Tool powered by OpenRouter models",
     version="0.1.0",
     lifespan=lifespan,
 )

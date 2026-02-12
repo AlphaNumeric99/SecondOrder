@@ -9,9 +9,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-import anthropic
-
 from app.config import settings
+from app.llm_client import get_client
 from benchmarks.base import Benchmark, BenchmarkTask, EvalResult
 
 JUDGE_SYSTEM = """You are an expert evaluator for the DeepSearchQA benchmark.
@@ -107,11 +106,11 @@ class DeepSearchQABenchmark(Benchmark):
 
     async def evaluate(self, task: BenchmarkTask, response: str) -> EvalResult:
         """Evaluate response using LLM-as-judge for answer extraction and matching."""
-        client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        client = get_client()
         answer_type = task.metadata.get("answer_type", "Set Answer")
 
         judge_response = await client.messages.create(
-            model="claude-sonnet-4-5-20250929",
+            model=settings.benchmark_judge_model,
             max_tokens=2048,
             system=JUDGE_SYSTEM,
             messages=[{

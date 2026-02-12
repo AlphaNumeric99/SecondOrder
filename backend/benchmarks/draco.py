@@ -8,9 +8,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-import anthropic
-
 from app.config import settings
+from app.llm_client import get_client
 from benchmarks.base import Benchmark, BenchmarkTask, EvalResult
 
 JUDGE_SYSTEM = """You are an expert research evaluator. You will be given:
@@ -77,7 +76,7 @@ class DRACOBenchmark(Benchmark):
 
     async def evaluate(self, task: BenchmarkTask, response: str) -> EvalResult:
         """Evaluate response against DRACO rubric using LLM-as-judge."""
-        client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        client = get_client()
 
         # Parse rubric from reference
         try:
@@ -88,7 +87,7 @@ class DRACOBenchmark(Benchmark):
         rubric_text = json.dumps(rubric, indent=2) if isinstance(rubric, dict) else str(rubric)
 
         judge_response = await client.messages.create(
-            model="claude-sonnet-4-5-20250929",  # Use Sonnet as judge for cost efficiency
+            model=settings.benchmark_judge_model,
             max_tokens=4096,
             system=JUDGE_SYSTEM,
             messages=[{

@@ -1,24 +1,26 @@
 from __future__ import annotations
 
-from app.config import settings
-
-
 def get_available_models() -> list[dict[str, str]]:
-    """Return the list of available Claude models for research."""
+    """Return a curated list of OpenRouter model IDs for research."""
     return [
         {
-            "id": "claude-opus-4-6",
-            "name": "Claude Opus 4.6",
-            "description": "Most capable model. Best for complex, nuanced research requiring deep analysis.",
+            "id": "openai/gpt-4o-mini",
+            "name": "GPT-4o Mini",
+            "description": "Fast and cost-efficient default for everyday deep research.",
         },
         {
-            "id": "claude-sonnet-4-5-20250929",
-            "name": "Claude Sonnet 4.5",
-            "description": "Fast and capable. Good balance of speed and quality for most research tasks.",
+            "id": "openai/gpt-4.1",
+            "name": "GPT-4.1",
+            "description": "Higher quality reasoning for harder multi-source synthesis tasks.",
         },
         {
-            "id": "claude-haiku-4-5-20251001",
-            "name": "Claude Haiku 4.5",
-            "description": "Fastest model. Best for quick lookups and lightweight research tasks.",
+            "id": "google/gemini-2.0-flash-001",
+            "name": "Gemini 2.0 Flash",
+            "description": "High-throughput option for broad exploratory query expansion.",
+        },
+        {
+            "id": "meta-llama/llama-3.3-70b-instruct",
+            "name": "Llama 3.3 70B Instruct",
+            "description": "Strong open-weight alternative for lower-cost long-form synthesis.",
         },
     ]

@@ -97,7 +97,7 @@ class Benchmark(ABC):
 
     async def run(
         self,
-        model: str = "claude-sonnet-4-5-20250929",
+        model: str = "openai/gpt-4o-mini",
         limit: int | None = None,
         output_dir: str = "benchmarks/results",
     ) -> BenchmarkReport:

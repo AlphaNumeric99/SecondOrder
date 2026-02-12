@@ -51,6 +51,15 @@ async def stream_research(session_id: UUID):
 
     async def event_generator():
         import json as _json
+        from app.services import logger as log_service
+
+        log_service.log_event(
+            event_type="research_started",
+            message=f"Research started",
+            session_id=str(session_id),
+            model=model,
+            query=query[:100],
+        )
 
         orchestrator = ResearchOrchestrator(model=model, session_id=str(session_id))
         final_report = ""
@@ -98,8 +107,15 @@ async def stream_research(session_id: UUID):
                     await db.create_research_step(
                         session_id, "error", event.data
                     )
-            except Exception:
-                pass  # Don't let DB errors break the SSE stream
+            except Exception as e:
+                from app.services import logger as log_service
+
+                log_service.log_event(
+                    event_type="db_error",
+                    message=f"Failed to persist research step: {etype}",
+                    error=str(e),
+                    session_id=str(session_id),
+                )
 
             yield {
                 "event": etype,

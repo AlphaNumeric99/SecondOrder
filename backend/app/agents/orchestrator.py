@@ -11,7 +11,7 @@ from app.agents.analyzer_agent import AnalyzerAgent
 from app.agents.search_agent import SearchAgent
 from app.agents.scraper_agent import ScraperAgent
 from app.config import settings
-from app.llm_client import client, get_model
+from app.llm_client import client as llm_client, get_model
 from app.models.events import SSEEvent
 from app.services import streaming
 from app.services import supabase as db
@@ -22,7 +22,7 @@ class ResearchOrchestrator:
     """Orchestrates the full research pipeline.
 
     Flow:
-      1. Generate research plan (sub-queries/angles) via Claude
+      1. Generate research plan (sub-queries/angles) via LLM
       2. Fan out: run search agents in parallel
       3. Collect results, identify top URLs
       4. Fan out: scrape top URLs in parallel
@@ -35,27 +35,46 @@ class ResearchOrchestrator:
     def __init__(self, model: str | None = None, session_id: str | None = None):
         self.model = model or get_model()
         self.session_id = session_id
-        self.client = client()
+        self.client = None
 
     async def _log_call(self, caller: str, response: Any, elapsed_ms: int) -> None:
-        """Log an LLM call to the database. Silently ignores errors."""
+        """Log an LLM call to the database and file logs."""
+        from app.services import logger as log_service
+
         try:
             usage = response.usage if hasattr(response, "usage") else None
+            input_tokens = getattr(usage, "input_tokens", 0) if usage else 0
+            output_tokens = getattr(usage, "output_tokens", 0) if usage else 0
+
             await db.log_llm_call(
                 model=self.model,
                 caller=caller,
-                input_tokens=getattr(usage, "input_tokens", 0) if usage else 0,
-                output_tokens=getattr(usage, "output_tokens", 0) if usage else 0,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
                 duration_ms=elapsed_ms,
                 session_id=UUID(self.session_id) if self.session_id else None,
             )
-        except Exception:
-            pass
+            # Also log to file for debugging
+            log_service.log_llm_call(
+                model=self.model,
+                caller=caller,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                duration_ms=elapsed_ms,
+            )
+        except Exception as e:
+            log_service.log_event(
+                event_type="logging_error",
+                message=f"Failed to log LLM call in {caller}",
+                error=str(e),
+                model=self.model,
+            )
 
     async def _generate_plan(self, query: str) -> list[str]:
-        """Use Claude to break the research query into sub-queries."""
+        """Use the configured model to break the research query into sub-queries."""
+        active_client = self.client or llm_client()
         t0 = time.monotonic()
-        response = await self.client.messages.create(
+        response = await active_client.messages.create(
             model=self.model,
             max_tokens=2048,
             system=(
@@ -192,8 +211,9 @@ class ResearchOrchestrator:
         yield streaming.synthesis_started(len(search_results))
 
         # Use streaming for the synthesis to get incremental output
+        active_client = self.client or llm_client()
         t0 = time.monotonic()
-        async with self.client.messages.stream(
+        async with active_client.messages.stream(
             model=self.model,
             max_tokens=8192,
             system=AnalyzerAgent.get_system_prompt(),

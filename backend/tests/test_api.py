@@ -1,6 +1,6 @@
 """Tests for API routes."""
 import pytest
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch
 
 
 # Test health endpoint works without any dependencies
@@ -9,12 +9,14 @@ def app():
     """Create test app with mocked settings."""
     with patch("app.config.Settings") as mock_settings:
         mock_settings.return_value.cors_origin_list = ["http://localhost:3000"]
-        mock_settings.return_value.anthropic_api_key = "test"
+        mock_settings.return_value.openrouter_api_key = "test"
         mock_settings.return_value.tavily_api_key = "test"
         mock_settings.return_value.hasdata_api_key = "test"
         mock_settings.return_value.supabase_url = "https://test.supabase.co"
         mock_settings.return_value.supabase_anon_key = "test"
-        mock_settings.return_value.default_model = "claude-sonnet-4-5-20250929"
+        mock_settings.return_value.default_model = "openai/gpt-4o-mini"
+        mock_settings.return_value.openrouter_model = ""
+        mock_settings.return_value.benchmark_judge_model = "openai/gpt-4o-mini"
         mock_settings.return_value.cors_origins = "http://localhost:3000"
 
         from app.main import app
@@ -42,6 +44,6 @@ def test_list_models(client):
     assert "models" in data
     assert len(data["models"]) >= 3
     model_ids = [m["id"] for m in data["models"]]
-    assert "claude-opus-4-6" in model_ids
-    assert "claude-sonnet-4-5-20250929" in model_ids
-    assert "claude-haiku-4-5-20251001" in model_ids
+    assert "openai/gpt-4o-mini" in model_ids
+    assert "openai/gpt-4.1" in model_ids
+    assert "google/gemini-2.0-flash-001" in model_ids
