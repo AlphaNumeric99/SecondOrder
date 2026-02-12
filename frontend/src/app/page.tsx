@@ -7,44 +7,15 @@ import { ChatMessages } from "@/components/chat/ChatMessages";
 import { ResearchPanel } from "@/components/research/ResearchPanel";
 import { useResearch } from "@/hooks/useResearch";
 import { useSessions } from "@/hooks/useSessions";
-import { getSession, getModels } from "@/lib/api";
-import type { Message, ModelInfo } from "@/types";
-
-const DEFAULT_MODELS: ModelInfo[] = [
-  {
-    id: "claude-sonnet-4-5-20250929",
-    name: "Claude Sonnet 4.5",
-    description: "Fast and capable. Good balance of speed and quality.",
-  },
-  {
-    id: "claude-opus-4-6",
-    name: "Claude Opus 4.6",
-    description: "Most capable model. Best for complex research.",
-  },
-  {
-    id: "claude-haiku-4-5-20251001",
-    name: "Claude Haiku 4.5",
-    description: "Fastest model. Quick lookups and lightweight research.",
-  },
-];
+import { getSession } from "@/lib/api";
+import type { Message } from "@/types";
 
 export default function Home() {
   const { state: researchState, startNewResearch, reset } = useResearch();
   const { sessions, refresh: refreshSessions, deleteSession } = useSessions();
 
-  const [models, setModels] = useState<ModelInfo[]>(DEFAULT_MODELS);
-  const [selectedModel, setSelectedModel] = useState("claude-sonnet-4-5-20250929");
   const [messages, setMessages] = useState<Message[]>([]);
-  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
-
-  // Load models from backend
-  useEffect(() => {
-    getModels()
-      .then((res) => setModels(res.models))
-      .catch(() => {
-        /* Use defaults */
-      });
-  }, []);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
 
   // Refresh sessions when research completes
   useEffect(() => {
@@ -53,12 +24,7 @@ export default function Home() {
     }
   }, [researchState.status, refreshSessions]);
 
-  // Track active session from research
-  useEffect(() => {
-    if (researchState.sessionId) {
-      setActiveSessionId(researchState.sessionId);
-    }
-  }, [researchState.sessionId]);
+  const activeSessionId = researchState.sessionId ?? selectedSessionId;
 
   const handleSubmit = useCallback(
     async (query: string) => {
@@ -72,16 +38,16 @@ export default function Home() {
         created_at: new Date().toISOString(),
       };
       setMessages([userMsg]);
-      await startNewResearch(query, selectedModel);
+      await startNewResearch(query);
     },
-    [selectedModel, startNewResearch],
+    [startNewResearch],
   );
 
   const handleSelectSession = useCallback(async (sessionId: string) => {
     try {
       reset();
       const data = await getSession(sessionId);
-      setActiveSessionId(sessionId);
+      setSelectedSessionId(sessionId);
       setMessages(
         data.messages.map((m) => ({
           ...m,
@@ -96,7 +62,7 @@ export default function Home() {
   const handleNewResearch = useCallback(() => {
     reset();
     setMessages([]);
-    setActiveSessionId(null);
+    setSelectedSessionId(null);
   }, [reset]);
 
   const handleDeleteSession = useCallback(
@@ -133,9 +99,6 @@ export default function Home() {
           }
         />
         <ChatInput
-          models={models}
-          selectedModel={selectedModel}
-          onModelChange={setSelectedModel}
           onSubmit={handleSubmit}
           disabled={isResearching}
         />

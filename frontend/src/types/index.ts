@@ -85,12 +85,6 @@ export interface Message {
   created_at: string;
 }
 
-export interface ModelInfo {
-  id: string;
-  name: string;
-  description: string;
-}
-
 // --- UI State ---
 
 export type ResearchStatus =

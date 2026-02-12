@@ -1,29 +1,19 @@
 "use client";
 
 import { KeyboardEvent, useState } from "react";
-import { ArrowUp, ChevronDown } from "lucide-react";
-import type { ModelInfo } from "@/types";
+import { ArrowUp } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface ChatInputProps {
-  models: ModelInfo[];
-  selectedModel: string;
-  onModelChange: (model: string) => void;
   onSubmit: (query: string) => void;
   disabled?: boolean;
 }
 
 export function ChatInput({
-  models,
-  selectedModel,
-  onModelChange,
   onSubmit,
   disabled = false,
 }: ChatInputProps) {
   const [query, setQuery] = useState("");
-  const [showModelPicker, setShowModelPicker] = useState(false);
-
-  const selectedModelInfo = models.find((m) => m.id === selectedModel);
 
   const handleSubmit = () => {
     const trimmed = query.trim();
@@ -65,40 +55,6 @@ export function ChatInput({
           >
             <ArrowUp size={18} />
           </button>
-        </div>
-
-        {/* Model Selector */}
-        <div className="relative mt-2 flex items-center justify-between">
-          <button
-            onClick={() => setShowModelPicker(!showModelPicker)}
-            className="flex items-center gap-1 rounded-lg px-3 py-1.5 text-xs text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-300"
-          >
-            {selectedModelInfo?.name || selectedModel}
-            <ChevronDown size={14} />
-          </button>
-
-          {showModelPicker && (
-            <div className="absolute bottom-full left-0 mb-1 rounded-lg border border-zinc-700 bg-zinc-800 p-1 shadow-xl">
-              {models.map((model) => (
-                <button
-                  key={model.id}
-                  onClick={() => {
-                    onModelChange(model.id);
-                    setShowModelPicker(false);
-                  }}
-                  className={cn(
-                    "block w-full rounded-md px-3 py-2 text-left text-sm transition-colors",
-                    model.id === selectedModel
-                      ? "bg-blue-600/20 text-blue-400"
-                      : "text-zinc-300 hover:bg-zinc-700",
-                  )}
-                >
-                  <p className="font-medium">{model.name}</p>
-                  <p className="text-xs text-zinc-500">{model.description}</p>
-                </button>
-              ))}
-            </div>
-          )}
         </div>
       </div>
     </div>

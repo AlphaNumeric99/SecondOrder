@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
 from app.config import settings
+from app.services.env_safety import sanitize_ssl_keylogfile
 
 
 @dataclass
@@ -238,6 +239,7 @@ def get_client() -> OpenRouterClientAdapter:
     """Get OpenRouter client via OpenAI-compatible SDK."""
     from openai import AsyncOpenAI
 
+    sanitize_ssl_keylogfile()
     openai_client = AsyncOpenAI(
         api_key=settings.openrouter_api_key,
         base_url="https://openrouter.ai/api/v1",

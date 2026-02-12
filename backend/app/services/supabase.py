@@ -7,9 +7,11 @@ from uuid import UUID
 from supabase import create_client, Client
 
 from app.config import settings
+from app.services.env_safety import sanitize_ssl_keylogfile
 
 
 def get_client() -> Client:
+    sanitize_ssl_keylogfile()
     return create_client(settings.supabase_url, settings.supabase_anon_key)
 
 

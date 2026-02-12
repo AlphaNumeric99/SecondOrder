@@ -121,7 +121,7 @@ export function useResearch() {
   }, []);
 
   const startNewResearch = useCallback(
-    async (query: string, model: string) => {
+    async (query: string) => {
       // Clean up any existing connection
       if (cleanupRef.current) {
         cleanupRef.current();
@@ -133,7 +133,7 @@ export function useResearch() {
 
       try {
         // Start research on backend
-        const { session_id } = await startResearch(query, model);
+        const { session_id } = await startResearch(query);
         setState((prev) => ({ ...prev, sessionId: session_id }));
 
         // Connect to SSE stream

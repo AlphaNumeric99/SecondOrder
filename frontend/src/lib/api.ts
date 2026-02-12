@@ -12,10 +12,10 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json();
 }
 
-export async function startResearch(query: string, model: string) {
+export async function startResearch(query: string) {
   return request<{ session_id: string }>("/api/research", {
     method: "POST",
-    body: JSON.stringify({ query, model }),
+    body: JSON.stringify({ query }),
   });
 }
 
@@ -42,12 +42,6 @@ export async function deleteSession(sessionId: string) {
   return request<{ status: string }>(`/api/sessions/${sessionId}`, {
     method: "DELETE",
   });
-}
-
-export async function getModels() {
-  return request<{
-    models: Array<{ id: string; name: string; description: string }>;
-  }>("/api/models");
 }
 
 export function getStreamUrl(sessionId: string): string {
