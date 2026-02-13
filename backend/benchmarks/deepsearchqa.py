@@ -54,12 +54,12 @@ class DeepSearchQABenchmark(Benchmark):
         data_path = "benchmarks/data/deepsearchqa.json"
 
         try:
-            with open(data_path) as f:
+            with open(data_path, "r", encoding="utf-8") as f:
                 raw = json.load(f)
         except FileNotFoundError:
             print("  Downloading DeepSearchQA dataset from HuggingFace...")
             raw = await self._download_dataset()
-            with open(data_path, "w") as f:
+            with open(data_path, "w", encoding="utf-8") as f:
                 json.dump(raw, f)
 
         tasks = []

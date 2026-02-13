@@ -10,7 +10,6 @@ from uuid import UUID
 from app.agents.analyzer_agent import AnalyzerAgent
 from app.agents.search_agent import SearchAgent
 from app.agents.scraper_agent import ScraperAgent
-from app.config import settings
 from app.llm_client import client as llm_client, get_model
 from app.models.events import SSEEvent
 from app.services import streaming
@@ -176,7 +175,17 @@ class ResearchOrchestrator:
             all_events.append(event)
 
         all_content = agent.scraped_content
-        all_events.append(streaming.agent_completed("scraper", urls_scraped=len(all_content)))
+        # Emit completion per URL to keep start/completion lifecycle consistent.
+        for url in urls:
+            content = all_content.get(url, "")
+            all_events.append(
+                streaming.agent_completed(
+                    "scraper",
+                    url=url,
+                    success=bool(content),
+                    content_length=len(content),
+                )
+            )
 
         return all_content, all_events
 
@@ -251,6 +260,11 @@ class ResearchOrchestrator:
         elapsed_ms = int((time.monotonic() - t0) * 1000)
         final_msg = await stream.get_final_message()
         await self._log_call("orchestrator.synthesis", final_msg, elapsed_ms)
+        usage = getattr(final_msg, "usage", None)
+        tokens_used = (
+            (getattr(usage, "input_tokens", 0) or 0)
+            + (getattr(usage, "output_tokens", 0) or 0)
+        )
 
         # Build source list
         sources = []
@@ -268,7 +282,7 @@ class ResearchOrchestrator:
         yield streaming.research_complete(
             report=full_report,
             sources=sources[:20],
-            tokens_used=getattr(stream, "usage", {}).get("total_tokens", 0) if hasattr(stream, "usage") else 0,
+            tokens_used=tokens_used,
         )
 
     async def research(self, query: str) -> AsyncGenerator[SSEEvent, None]:

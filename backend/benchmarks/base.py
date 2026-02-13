@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -62,7 +63,8 @@ class BenchmarkReport:
     def save(self, output_dir: str | Path) -> Path:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"{self.benchmark_name}_{self.model}_{self.timestamp}.json"
+        safe_model = re.sub(r"[^A-Za-z0-9_.-]+", "_", self.model).strip("_")
+        filename = f"{self.benchmark_name}_{safe_model}_{self.timestamp}.json"
         path = output_dir / filename
         path.write_text(json.dumps(self.to_dict(), indent=2))
         return path

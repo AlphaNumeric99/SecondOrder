@@ -37,6 +37,15 @@ export function ChatMessage({ role, content }: ChatMessageProps) {
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
               rehypePlugins={[rehypeHighlight]}
+              components={{
+                a: ({ ...props }) => (
+                  <a
+                    {...props}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  />
+                ),
+              }}
             >
               {content}
             </ReactMarkdown>

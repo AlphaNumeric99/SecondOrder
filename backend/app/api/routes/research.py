@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException
@@ -7,18 +8,39 @@ from sse_starlette.sse import EventSourceResponse
 
 from app.agents.orchestrator import ResearchOrchestrator
 from app.llm_client import get_model
+from app.services import streaming
 from app.models.schemas import ResearchRequest, ResearchStartResponse
 from app.services import supabase as db
 
 router = APIRouter(prefix="/api/research", tags=["research"])
 
 
+def _event_step_key(event_type: str, data: dict) -> str | None:
+    """Build deterministic persistence key for step lifecycle events."""
+    if event_type not in ("agent_started", "agent_completed"):
+        return None
+
+    agent = data.get("agent", "unknown")
+    if agent == "scraper":
+        url = data.get("url")
+        if url:
+            digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:12]
+            return f"{agent}_{digest}"
+        return f"{agent}_single"
+
+    step = data.get("step")
+    if step is not None:
+        return f"{agent}_{step}"
+    return f"{agent}_single"
+
+
 @router.post("", response_model=ResearchStartResponse)
 async def start_research(request: ResearchRequest):
     """Start a new research session. Returns session_id to use for streaming."""
+    model = request.model or get_model()
     # Create session
     session = await db.create_session(
-        model=request.model,
+        model=model,
         title=request.query[:100],
     )
     session_id = session["id"]
@@ -65,69 +87,80 @@ async def stream_research(session_id: UUID):
         final_report = ""
         step_ids: dict[str, str] = {}
 
-        async for event in orchestrator.research(query):
-            etype = event.event.value
+        try:
+            async for event in orchestrator.research(query):
+                etype = event.event.value
 
-            if etype == "research_complete":
-                final_report = event.data.get("report", "")
+                if etype == "research_complete":
+                    final_report = event.data.get("report", "")
 
-            # Persist research steps to Supabase
-            try:
-                if etype == "plan_created":
-                    step = await db.create_research_step(
-                        session_id, "plan", {"steps": event.data.get("steps", [])}
+                # Persist research steps to Supabase
+                try:
+                    if etype == "plan_created":
+                        step = await db.create_research_step(
+                            session_id, "plan", {"steps": event.data.get("steps", [])}
+                        )
+                        step_ids["plan"] = step["id"]
+                        await db.update_research_step(UUID(step["id"]), "completed")
+                    elif etype == "agent_started":
+                        agent = event.data.get("agent", "unknown")
+                        step_key = _event_step_key(etype, event.data)
+                        step = await db.create_research_step(
+                            session_id, agent, event.data
+                        )
+                        if step_key:
+                            step_ids[step_key] = step["id"]
+                        await db.update_research_step(UUID(step["id"]), "running")
+                    elif etype == "agent_completed":
+                        step_key = _event_step_key(etype, event.data)
+                        sid = step_ids.get(step_key or "")
+                        if sid:
+                            await db.update_research_step(UUID(sid), "completed", event.data)
+                    elif etype == "synthesis_started":
+                        step = await db.create_research_step(
+                            session_id, "synthesis", event.data
+                        )
+                        step_ids["synthesis"] = step["id"]
+                        await db.update_research_step(UUID(step["id"]), "running")
+                    elif etype == "research_complete":
+                        sid = step_ids.get("synthesis")
+                        if sid:
+                            await db.update_research_step(UUID(sid), "completed")
+                    elif etype == "error":
+                        await db.create_research_step(
+                            session_id, "error", event.data
+                        )
+                except Exception as e:
+                    log_service.log_event(
+                        event_type="db_error",
+                        message=f"Failed to persist research step: {etype}",
+                        error=str(e),
+                        session_id=str(session_id),
                     )
-                    step_ids["plan"] = step["id"]
-                    await db.update_research_step(UUID(step["id"]), "completed")
-                elif etype == "agent_started":
-                    agent = event.data.get("agent", "unknown")
-                    step_key = f"{agent}_{event.data.get('step', 0)}"
-                    step = await db.create_research_step(
-                        session_id, agent, event.data
-                    )
-                    step_ids[step_key] = step["id"]
-                    await db.update_research_step(UUID(step["id"]), "running")
-                elif etype == "agent_completed":
-                    agent = event.data.get("agent", "unknown")
-                    step_key = f"{agent}_{event.data.get('step', 0)}"
-                    sid = step_ids.get(step_key)
-                    if sid:
-                        await db.update_research_step(UUID(sid), "completed", event.data)
-                elif etype == "synthesis_started":
-                    step = await db.create_research_step(
-                        session_id, "synthesis", event.data
-                    )
-                    step_ids["synthesis"] = step["id"]
-                    await db.update_research_step(UUID(step["id"]), "running")
-                elif etype == "research_complete":
-                    sid = step_ids.get("synthesis")
-                    if sid:
-                        await db.update_research_step(UUID(sid), "completed")
-                elif etype == "error":
-                    await db.create_research_step(
-                        session_id, "error", event.data
-                    )
-            except Exception as e:
-                from app.services import logger as log_service
 
-                log_service.log_event(
-                    event_type="db_error",
-                    message=f"Failed to persist research step: {etype}",
-                    error=str(e),
-                    session_id=str(session_id),
+                yield {
+                    "event": etype,
+                    "data": _json.dumps(event.data),
+                }
+
+            # Save assistant response to DB
+            if final_report:
+                await db.create_message(
+                    session_id=session_id,
+                    role="assistant",
+                    content=final_report,
                 )
-
-            yield {
-                "event": etype,
-                "data": _json.dumps(event.data),
-            }
-
-        # Save assistant response to DB
-        if final_report:
-            await db.create_message(
-                session_id=session_id,
-                role="assistant",
-                content=final_report,
+        except Exception as e:
+            log_service.log_event(
+                event_type="stream_error",
+                message="Unhandled error in research stream",
+                error=str(e),
+                session_id=str(session_id),
             )
+            error_event = streaming.error("Research stream failed unexpectedly.")
+            yield {
+                "event": error_event.event.value,
+                "data": _json.dumps(error_event.data),
+            }
 
     return EventSourceResponse(event_generator())
