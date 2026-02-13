@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import json
 import time
 from typing import Any, AsyncGenerator
 
-from app.config import settings
 from app.llm_client import client as llm_client, get_model
 from app.models.events import SSEEvent
+from app.services import logger as log_service
 from app.services import supabase as db
 
 
@@ -72,7 +71,6 @@ class BaseAgent:
             # Log the LLM call
             try:
                 from uuid import UUID
-                from app.services import logger as log_service
 
                 usage = response.usage
                 await db.log_llm_call(
@@ -92,12 +90,16 @@ class BaseAgent:
                     duration_ms=elapsed_ms,
                 )
             except Exception as e:
-                log_service.log_event(
-                    event_type="logging_error",
-                    message=f"Failed to log LLM call in {self.name}",
-                    error=str(e),
-                    model=self.model,
-                )
+                try:
+                    log_service.log_event(
+                        event_type="logging_error",
+                        message=f"Failed to log LLM call in {self.name}",
+                        error=str(e),
+                        model=self.model,
+                    )
+                except Exception:
+                    # Never break agent execution because logging failed.
+                    pass
 
             # Check if the response contains tool use
             tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
