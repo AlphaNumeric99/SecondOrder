@@ -25,8 +25,22 @@ def agent_completed(agent: str, **kwargs: Any) -> SSEEvent:
     return SSEEvent(event=EventType.AGENT_COMPLETED, data={"agent": agent, **kwargs})
 
 
-def search_result(step: int, results: list[dict]) -> SSEEvent:
-    return SSEEvent(event=EventType.SEARCH_RESULT, data={"step": step, "results": results})
+def search_result(
+    step: int,
+    results: list[dict],
+    *,
+    provider: str | None = None,
+    fallback_from: str | None = None,
+    fallback_reason: str | None = None,
+) -> SSEEvent:
+    data: dict[str, Any] = {"step": step, "results": results}
+    if provider:
+        data["provider"] = provider
+    if fallback_from:
+        data["fallback_from"] = fallback_from
+    if fallback_reason:
+        data["fallback_reason"] = fallback_reason
+    return SSEEvent(event=EventType.SEARCH_RESULT, data=data)
 
 
 def scrape_result(url: str, content_preview: str) -> SSEEvent:

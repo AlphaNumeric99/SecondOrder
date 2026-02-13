@@ -6,11 +6,11 @@ from typing import Any
 from app.agents.base import BaseAgent
 from app.models.events import SSEEvent
 from app.services import streaming
-from app.tools import tavily_search
+from app.tools import search_provider
 
 
 class SearchAgent(BaseAgent):
-    """Agent that searches the web using Tavily to find relevant information."""
+    """Agent that searches the web using configured provider(s)."""
 
     name = "search"
 
@@ -78,20 +78,29 @@ class SearchAgent(BaseAgent):
                 self.name, step=self.step_index, query=query, status="searching"
             ))
 
-            results = await tavily_search.search(
+            search_response = await search_provider.search(
                 query=query,
                 search_depth=tool_input.get("search_depth", "advanced"),
                 max_results=tool_input.get("max_results", 10),
                 time_range=tool_input.get("time_range"),
             )
+            results = search_response.results
 
-            result_dicts = tavily_search.results_to_dicts(results)
+            result_dicts = search_provider.results_to_dicts(results)
             self.all_results.extend(result_dicts)
 
-            events.append(streaming.search_result(self.step_index, result_dicts))
+            events.append(
+                streaming.search_result(
+                    self.step_index,
+                    result_dicts,
+                    provider=search_response.provider,
+                    fallback_from=search_response.fallback_from,
+                    fallback_reason=search_response.fallback_reason,
+                )
+            )
 
             return (
-                f"Found {len(results)} results for '{query}':\n"
+                f"Found {len(results)} results for '{query}' via {search_response.provider}:\n"
                 + "\n".join(
                     f"- [{r.title}]({r.url}): {r.content[:200]}" for r in results
                 ),
