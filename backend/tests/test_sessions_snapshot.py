@@ -59,3 +59,27 @@ def test_build_research_snapshot_marks_error_state():
 
     assert snapshot["status"] == "error"
     assert snapshot["error"] == "Search provider unavailable"
+
+
+def test_build_research_snapshot_includes_persisted_notes():
+    messages = []
+    research_steps = [
+        {
+            "id": "note-1",
+            "step_type": "notes",
+            "status": "completed",
+            "data": {
+                "highlights": [
+                    "Identified candidate artist as Owen Richard Evans.",
+                    "Two viral TikTok songs were repeatedly cited.",
+                ]
+            },
+        }
+    ]
+
+    snapshot = _build_research_snapshot(messages, research_steps)
+
+    assert snapshot["notes"] == [
+        "Identified candidate artist as Owen Richard Evans.",
+        "Two viral TikTok songs were repeatedly cited.",
+    ]

@@ -16,13 +16,14 @@ class ScrapeResult:
     url: str
     content: str
     status_code: int
+    output_format: str
     from_cache: bool = False
 
 
-def _resolve_output_format() -> str:
-    fmt = settings.scrape_output_format.lower().strip()
+def _resolve_output_format(output_format_override: str | None = None) -> str:
+    fmt = (output_format_override or settings.scrape_output_format).lower().strip()
     if fmt not in SUPPORTED_OUTPUT_FORMATS:
-        return "markdown"
+        return "html"
     return fmt
 
 
@@ -34,9 +35,14 @@ def _extract_content(payload: dict, output_format: str) -> str:
     return str(payload.get("content") or payload.get("html") or payload.get("text") or "")
 
 
-async def scrape(url: str, *, render_js: bool = False) -> ScrapeResult:
+async def scrape(
+    url: str,
+    *,
+    render_js: bool = False,
+    output_format_override: str | None = None,
+) -> ScrapeResult:
     """Scrape a URL using Hasdata API and return cleaned content."""
-    output_format = _resolve_output_format()
+    output_format = _resolve_output_format(output_format_override)
 
     cached = scrape_cache.load(url, render_js=render_js, output_format=output_format)
     if cached is not None:
@@ -44,6 +50,7 @@ async def scrape(url: str, *, render_js: bool = False) -> ScrapeResult:
             url=url,
             content=str(cached["content"]),
             status_code=int(cached["status_code"]),
+            output_format=output_format,
             from_cache=True,
         )
 
@@ -83,15 +90,24 @@ async def scrape(url: str, *, render_js: bool = False) -> ScrapeResult:
         url=url,
         content=content,
         status_code=status_code,
+        output_format=output_format,
         from_cache=False,
     )
 
 
-async def scrape_multiple(urls: list[str], *, render_js: bool = False) -> list[ScrapeResult]:
+async def scrape_multiple(
+    urls: list[str],
+    *,
+    render_js: bool = False,
+    output_format_override: str | None = None,
+) -> list[ScrapeResult]:
     """Scrape multiple URLs concurrently."""
     import asyncio
 
-    tasks = [scrape(url, render_js=render_js) for url in urls]
+    tasks = [
+        scrape(url, render_js=render_js, output_format_override=output_format_override)
+        for url in urls
+    ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     scraped: list[ScrapeResult] = []

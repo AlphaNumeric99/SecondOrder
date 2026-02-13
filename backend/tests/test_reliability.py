@@ -226,3 +226,144 @@ def test_stream_research_emits_error_event_on_unhandled_exception():
     assert response.status_code == 200
     assert "event: error" in body
     assert "Research stream failed unexpectedly." in body
+
+
+def test_strip_deferred_sections_removes_future_work_heading():
+    from app.agents.orchestrator import ResearchOrchestrator
+
+    orchestrator = ResearchOrchestrator(model="openai/gpt-4o-mini")
+    report = (
+        "## Findings\n"
+        "Answer text.\n\n"
+        "## Areas for Further Investigation\n"
+        "- More work later.\n\n"
+        "## Sources\n"
+        "- [A](https://example.com)"
+    )
+
+    cleaned = orchestrator._strip_deferred_sections(report)
+
+    assert "Areas for Further Investigation" not in cleaned
+    assert "More work later" not in cleaned
+    assert "## Sources" in cleaned
+
+
+@pytest.mark.asyncio
+async def test_run_parallel_searches_applies_step_offset():
+    from app.agents.orchestrator import ResearchOrchestrator
+    from app.models.events import SSEEvent, EventType
+
+    class FakeSearchAgent:
+        def __init__(self, model: str | None, step_index: int, session_id: str | None = None):
+            self.step_index = step_index
+            self.all_results = [{"title": f"r{step_index}", "url": f"https://example.com/{step_index}", "content": "c", "score": 1.0}]
+
+        async def run(self, query: str, context: str = ""):
+            yield SSEEvent(event=EventType.AGENT_PROGRESS, data={"agent": "search", "step": self.step_index})
+
+    with patch("app.agents.orchestrator.SearchAgent", FakeSearchAgent):
+        orchestrator = ResearchOrchestrator(model="openai/gpt-4o-mini")
+        _, events = await orchestrator._run_parallel_searches(
+            ["q1", "q2"], step_offset=5
+        )
+
+    started_steps = [e.data.get("step") for e in events if e.event.value == "agent_started"]
+    completed_steps = [e.data.get("step") for e in events if e.event.value == "agent_completed"]
+    assert started_steps == [5, 6]
+    assert completed_steps == [5, 6]
+
+
+@pytest.mark.asyncio
+async def test_capture_research_notes_falls_back_when_json_invalid():
+    from app.agents.orchestrator import ResearchOrchestrator
+
+    class FakeMessages:
+        async def create(self, **kwargs):
+            return SimpleNamespace(
+                content=[SimpleNamespace(type="text", text="not json")],
+                usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+            )
+
+    class FakeClient:
+        messages = FakeMessages()
+
+    orchestrator = ResearchOrchestrator(model="openai/gpt-4o-mini")
+    orchestrator.client = FakeClient()
+    orchestrator._log_call = AsyncMock()
+
+    notes = await orchestrator._capture_research_notes(
+        "query text",
+        [{"title": "A", "url": "https://example.com", "content": "snippet"}],
+        {},
+    )
+
+    assert notes.highlights
+    assert isinstance(notes.unresolved_points, list)
+
+
+@pytest.mark.asyncio
+async def test_review_report_sufficiency_parses_json():
+    from app.agents.orchestrator import ResearchNotes, ResearchOrchestrator
+
+    class FakeMessages:
+        async def create(self, **kwargs):
+            return SimpleNamespace(
+                content=[
+                    SimpleNamespace(
+                        type="text",
+                        text=(
+                            '{"needs_more_research": true, '
+                            '"reason": "Missing publication-year confirmation.", '
+                            '"missing_points": ["Confirm release years."], '
+                            '"follow_up_queries": ["artist song release year source", "song wikipedia release date"]}'
+                        ),
+                    )
+                ],
+                usage=SimpleNamespace(input_tokens=2, output_tokens=2),
+            )
+
+    class FakeClient:
+        messages = FakeMessages()
+
+    orchestrator = ResearchOrchestrator(model="openai/gpt-4o-mini")
+    orchestrator.client = FakeClient()
+    orchestrator._log_call = AsyncMock()
+
+    review = await orchestrator._review_report_sufficiency(
+        "query",
+        "draft",
+        ResearchNotes(),
+    )
+
+    assert review.needs_more_research is True
+    assert review.reason.startswith("Missing publication-year")
+    assert review.missing_points == ["Confirm release years."]
+    assert len(review.follow_up_queries) == 2
+
+
+@pytest.mark.asyncio
+async def test_review_report_sufficiency_fallback_uses_uncertainty_markers():
+    from app.agents.orchestrator import ResearchNotes, ResearchOrchestrator
+
+    class FakeMessages:
+        async def create(self, **kwargs):
+            return SimpleNamespace(
+                content=[SimpleNamespace(type="text", text="not-json")],
+                usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+            )
+
+    class FakeClient:
+        messages = FakeMessages()
+
+    orchestrator = ResearchOrchestrator(model="openai/gpt-4o-mini")
+    orchestrator.client = FakeClient()
+    orchestrator._log_call = AsyncMock()
+
+    review = await orchestrator._review_report_sufficiency(
+        "query",
+        "The available sources are insufficient evidence and unclear from available sources.",
+        ResearchNotes(follow_up_queries=["query corroborating source"]),
+    )
+
+    assert review.needs_more_research is True
+    assert review.follow_up_queries == ["query corroborating source"]

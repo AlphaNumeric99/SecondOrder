@@ -115,3 +115,29 @@ async def test_expired_cache_entry_is_ignored(monkeypatch, tmp_path):
     assert calls == 1
     assert result.from_cache is False
     assert result.content == "fresh"
+
+
+@pytest.mark.asyncio
+async def test_scrape_respects_output_format_override(monkeypatch, tmp_path):
+    monkeypatch.delenv("SSLKEYLOGFILE", raising=False)
+    monkeypatch.setattr(settings, "hasdata_api_key", "test-key")
+    monkeypatch.setattr(settings, "scrape_output_format", "markdown")
+    monkeypatch.setattr(settings, "scrape_cache_enabled", True)
+    monkeypatch.setattr(settings, "scrape_cache_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "scrape_cache_ttl_hours", 24)
+
+    captured_payloads: list[dict] = []
+
+    async def fake_post(self, _url: str, **kwargs):  # noqa: ARG001
+        captured_payloads.append(kwargs.get("json", {}))
+        return _FakeResponse({"statusCode": 200, "html": "<html><body>ok</body></html>"})
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    result = await hasdata_scraper.scrape(
+        "https://example.com/html",
+        output_format_override="html",
+    )
+
+    assert result.output_format == "html"
+    assert captured_payloads[0]["outputFormat"] == ["json", "html"]

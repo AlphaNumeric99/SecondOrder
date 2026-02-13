@@ -76,6 +76,7 @@ def _extract_sources_from_report(report: str) -> list[dict[str, str]]:
 
 def _build_research_snapshot(messages: list[dict], research_steps: list[dict]) -> dict:
     plan: list[str] = []
+    notes: list[str] = []
     ui_steps: list[dict] = []
     sources: list[dict] = []
     source_urls: set[str] = set()
@@ -122,6 +123,16 @@ def _build_research_snapshot(messages: list[dict], research_steps: list[dict]) -
                     "results": results,
                 }
             )
+            continue
+
+        if step_type == "notes":
+            raw_notes = data.get("highlights", [])
+            if isinstance(raw_notes, list):
+                for item in raw_notes:
+                    if isinstance(item, str):
+                        note = " ".join(item.split()).strip()
+                        if note and note not in notes:
+                            notes.append(note)
             continue
 
         if step_type == "scraper":
@@ -190,6 +201,7 @@ def _build_research_snapshot(messages: list[dict], research_steps: list[dict]) -
     return {
         "status": status,
         "plan": plan,
+        "notes": notes,
         "steps": ui_steps,
         "sources": sources,
         "report": report,

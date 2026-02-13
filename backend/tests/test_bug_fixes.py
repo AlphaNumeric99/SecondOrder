@@ -230,3 +230,11 @@ class TestModelConsistency:
 
             agent = ScraperAgent(model=None)
             assert agent.model == "openai/gpt-4"
+
+
+def test_analyzer_prompt_avoids_future_investigation_wording():
+    from app.agents.analyzer_agent import AnalyzerAgent
+
+    prompt = AnalyzerAgent.get_system_prompt().lower()
+    assert "areas needing further investigation" not in prompt
+    assert "do not defer work to future investigation sections" in prompt

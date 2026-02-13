@@ -3,9 +3,10 @@ from __future__ import annotations
 from typing import Any
 
 from app.agents.base import BaseAgent
+from app.config import settings
 from app.models.events import SSEEvent
 from app.services import streaming
-from app.tools import hasdata_scraper, web_utils
+from app.tools import content_extractor, hasdata_scraper, web_utils
 
 
 class ScraperAgent(BaseAgent):
@@ -63,16 +64,26 @@ class ScraperAgent(BaseAgent):
 
             try:
                 result = await hasdata_scraper.scrape(
-                    url, render_js=tool_input.get("render_js", False)
+                    url,
+                    render_js=tool_input.get("render_js", False),
+                    output_format_override="html",
                 )
-                cleaned = web_utils.clean_content(result.content)
+                extracted = content_extractor.extract_main_content(
+                    url,
+                    result.content,
+                    max_chars=settings.extractor_max_page_chars,
+                )
+                cleaned = web_utils.clean_content(
+                    extracted.text,
+                    max_length=settings.extractor_max_page_chars,
+                )
                 self.scraped_content[url] = cleaned
 
                 events.append(streaming.scrape_result(url, cleaned[:500]))
 
                 return (
                     f"Content from {web_utils.extract_domain(url)} "
-                    f"({len(cleaned)} chars):\n{cleaned}",
+                    f"({len(cleaned)} chars, method={extracted.method}, fallback={extracted.fallback_used}):\n{cleaned}",
                     events,
                 )
             except Exception as e:
