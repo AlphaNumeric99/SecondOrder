@@ -20,7 +20,7 @@ You ask a question
   [Orchestrator] — breaks query into 3-5 research angles
        |
        v
-  [Search Agents] — parallel web searches via Tavily (one per angle)
+  [Search Agents] — parallel web searches via Brave (with Tavily fallback)
        |
        v
   [Scraper Agents] — extracts full content from top sources via Hasdata
@@ -39,7 +39,7 @@ Every step streams progress to the UI — you see the plan form, searches execut
 - **Backend**: Python + FastAPI, raw asyncio orchestration with OpenRouter (OpenAI-compatible SDK client)
 - **Frontend**: Next.js 16, React 19, Tailwind CSS 4
 - **Database**: Supabase (PostgreSQL) for sessions, messages, research steps, and LLM call logging
-- **Search**: Tavily API
+- **Search**: Brave Search API (primary) + Tavily (fallback)
 - **Scraping**: Hasdata API
 - **Models**: OpenRouter model IDs (user-selectable, e.g., GPT, Gemini, Llama families)
 
@@ -51,7 +51,7 @@ No agent frameworks. No LangChain. No LlamaIndex. Just Python, asyncio, and Open
 
 - Python 3.11+ (with uv)
 - Node.js 18+
-- API keys: OpenRouter, Tavily, Hasdata
+- API keys: OpenRouter, Hasdata, and either Brave or Tavily
 - Supabase project
 
 ### LLM Configuration (OpenRouter)
@@ -63,6 +63,10 @@ SecondOrder is OpenRouter-only. Configure your key and default model:
 OPENROUTER_API_KEY=sk-or-...
 DEFAULT_MODEL=openai/gpt-4o-mini
 OPENROUTER_MODEL=                     # optional per-env override
+SEARCH_PROVIDER=brave                 # brave or tavily
+BRAVE_API_KEY=...                     # required for brave
+SEARCH_FALLBACK_TO_TAVILY=true        # fallback if brave fails/returns empty
+TAVILY_API_KEY=...                    # required when fallback is enabled
 ```
 
 Available model examples:

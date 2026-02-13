@@ -11,6 +11,11 @@ class Settings(BaseSettings):
     # Tavily
     tavily_api_key: str
 
+    # Search provider
+    search_provider: str = "brave"  # brave | tavily
+    brave_api_key: str = ""
+    search_fallback_to_tavily: bool = True
+
     # Hasdata
     hasdata_api_key: str
 
