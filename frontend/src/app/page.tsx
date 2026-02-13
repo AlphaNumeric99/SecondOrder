@@ -11,11 +11,12 @@ import { getSession } from "@/lib/api";
 import type { Message } from "@/types";
 
 export default function Home() {
-  const { state: researchState, startNewResearch, reset } = useResearch();
+  const { state: researchState, startNewResearch, reset, hydrateFromSession } = useResearch();
   const { sessions, refresh: refreshSessions, deleteSession } = useSessions();
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const hasAssistantMessage = messages.some((m) => m.role === "assistant");
 
   // Refresh sessions when research completes
   useEffect(() => {
@@ -54,10 +55,11 @@ export default function Home() {
           role: m.role as "user" | "assistant",
         })),
       );
+      hydrateFromSession(sessionId, data.research);
     } catch (err) {
       console.error("Failed to load session:", err);
     }
-  }, [reset]);
+  }, [hydrateFromSession, reset]);
 
   const handleNewResearch = useCallback(() => {
     reset();
@@ -93,7 +95,8 @@ export default function Home() {
         <ChatMessages
           messages={messages}
           streamingContent={
-            researchState.status === "synthesizing" || researchState.status === "complete"
+            researchState.status === "synthesizing" ||
+            (researchState.status === "complete" && !hasAssistantMessage)
               ? researchState.report
               : undefined
           }

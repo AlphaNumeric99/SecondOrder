@@ -85,6 +85,15 @@ export interface Message {
   created_at: string;
 }
 
+export interface ResearchSnapshot {
+  status: ResearchStatus;
+  plan: string[];
+  steps: AgentStep[];
+  sources: Source[];
+  report: string;
+  error: string | null;
+}
+
 // --- UI State ---
 
 export type ResearchStatus =

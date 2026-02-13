@@ -1,3 +1,5 @@
+import type { ResearchSnapshot } from "@/types";
+
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -35,6 +37,7 @@ export async function getSession(sessionId: string) {
   return request<{
     session: { id: string; title: string | null; model: string; created_at: string; updated_at: string };
     messages: Array<{ id: string; session_id: string; role: string; content: string; metadata: Record<string, unknown>; created_at: string }>;
+    research: ResearchSnapshot | null;
   }>(`/api/sessions/${sessionId}`);
 }
 

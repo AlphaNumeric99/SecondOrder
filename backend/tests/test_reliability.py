@@ -63,6 +63,69 @@ async def test_get_sessions_uses_to_thread_for_blocking_execute():
 
 
 @pytest.mark.asyncio
+async def test_get_messages_normalizes_legacy_string_metadata():
+    from app.services import supabase
+
+    session_id = UUID("12345678-1234-5678-1234-567812345678")
+    raw_rows = [
+        {
+            "id": "m1",
+            "session_id": str(session_id),
+            "role": "assistant",
+            "content": "hello",
+            "metadata": "{}",
+            "created_at": "2026-02-13T10:00:00+00:00",
+        }
+    ]
+    fake_result = SimpleNamespace(data=raw_rows)
+    fake_query = MagicMock()
+    fake_query.execute = MagicMock(return_value=fake_result)
+
+    fake_table = MagicMock()
+    fake_table.select.return_value.eq.return_value.order.return_value = fake_query
+    fake_client = MagicMock()
+    fake_client.table.return_value = fake_table
+
+    with (
+        patch("app.services.supabase.client", return_value=fake_client),
+        patch("app.services.supabase.asyncio.to_thread", new=AsyncMock(return_value=fake_result)),
+    ):
+        rows = await supabase.get_messages(session_id)
+
+    assert rows[0]["metadata"] == {}
+
+
+@pytest.mark.asyncio
+async def test_create_message_writes_metadata_as_object():
+    from app.services import supabase
+
+    session_id = UUID("12345678-1234-5678-1234-567812345678")
+    fake_result = SimpleNamespace(data=[{"id": "m1"}])
+    fake_query = MagicMock()
+    fake_query.execute = MagicMock(return_value=fake_result)
+    insert_mock = MagicMock(return_value=fake_query)
+
+    fake_table = MagicMock()
+    fake_table.insert = insert_mock
+    fake_client = MagicMock()
+    fake_client.table.return_value = fake_table
+
+    with (
+        patch("app.services.supabase.client", return_value=fake_client),
+        patch("app.services.supabase.asyncio.to_thread", new=AsyncMock(return_value=fake_result)),
+    ):
+        await supabase.create_message(
+            session_id=session_id,
+            role="assistant",
+            content="hello",
+            metadata={"source": "test"},
+        )
+
+    payload = insert_mock.call_args.args[0]
+    assert payload["metadata"] == {"source": "test"}
+
+
+@pytest.mark.asyncio
 async def test_run_parallel_scrapes_emits_completion_per_url():
     from app.agents.orchestrator import ResearchOrchestrator
 

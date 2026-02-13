@@ -1,23 +1,43 @@
 """Centralized logging service for debugging and monitoring."""
-import logging
 import json
-from datetime import datetime
-from typing import Any, Optional
+import logging
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Optional
+
+from app.config import settings
 
 # Create logs directory
 LOG_DIR = Path("logs")
 LOG_DIR.mkdir(exist_ok=True)
 
+APP_LOG_LEVEL = getattr(logging, settings.app_log_level.upper(), logging.INFO)
+NOISY_LOG_LEVEL = getattr(logging, settings.noisy_log_level.upper(), logging.WARNING)
+
 # Configure logging
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=APP_LOG_LEVEL,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
         logging.FileHandler(LOG_DIR / "secondorder.log"),
         logging.StreamHandler(),  # Also print to console
     ],
 )
+
+# Reduce noise from framework/network libraries unless explicitly overridden.
+for logger_name in (
+    "uvicorn",
+    "uvicorn.error",
+    "uvicorn.access",
+    "fastapi",
+    "sse_starlette.sse",
+    "httpx",
+    "httpcore",
+    "hpack",
+    "openai._base_client",
+    "asyncio",
+):
+    logging.getLogger(logger_name).setLevel(NOISY_LOG_LEVEL)
 
 logger = logging.getLogger("secondorder")
 
@@ -33,7 +53,7 @@ def log_llm_call(
 ) -> None:
     """Log an LLM API call."""
     call_data = {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "model": model,
         "caller": caller,
         "input_tokens": input_tokens,
@@ -54,7 +74,7 @@ def log_research_step(
 ) -> None:
     """Log a research step."""
     step_data = {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "session_id": session_id,
         "step_type": step_type,
         "status": status,
@@ -72,7 +92,7 @@ def log_db_operation(
 ) -> None:
     """Log a database operation."""
     op_data = {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "operation": operation,
         "table": table,
         "status": status,
@@ -89,7 +109,7 @@ def log_event(
 ) -> None:
     """Log a generic event."""
     event_data = {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "event_type": event_type,
         "message": message,
         **kwargs,

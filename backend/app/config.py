@@ -29,6 +29,8 @@ class Settings(BaseSettings):
 
     # App
     cors_origins: str = "http://localhost:3000"
+    app_log_level: str = "INFO"
+    noisy_log_level: str = "WARNING"
 
     model_config = {
         "env_file": ".env",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -37,6 +38,7 @@ class MessageResponse(BaseModel):
 class SessionDetailResponse(BaseModel):
     session: SessionResponse
     messages: list[MessageResponse]
+    research: dict[str, Any] | None = None
 
 
 class ResearchStartResponse(BaseModel):

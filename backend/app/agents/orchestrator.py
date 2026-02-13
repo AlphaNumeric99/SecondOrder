@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from datetime import date
 from typing import Any, AsyncGenerator
@@ -71,6 +72,95 @@ class ResearchOrchestrator:
 
     async def _generate_plan(self, query: str) -> list[str]:
         """Use the configured model to break the research query into sub-queries."""
+        def normalize(raw_steps: Any) -> list[str]:
+            if not isinstance(raw_steps, list):
+                return []
+            cleaned: list[str] = []
+            seen: set[str] = set()
+            for item in raw_steps:
+                if not isinstance(item, str):
+                    continue
+                step = " ".join(item.split()).strip()
+                if not step:
+                    continue
+                key = step.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                cleaned.append(step)
+            return cleaned
+
+        def is_chain_query(text: str) -> bool:
+            q = text.lower()
+            markers = [
+                "who",
+                "that",
+                "which",
+                "from 20",
+                "from 19",
+                "list",
+                "all",
+                "between",
+                "relationship",
+            ]
+            return sum(1 for m in markers if m in q) >= 3
+
+        def extract_key_phrases(text: str) -> list[str]:
+            phrases: list[str] = []
+            seen: set[str] = set()
+
+            quoted = re.findall(r'"([^"]{2,120})"', text)
+            titled = re.findall(
+                r"\b[A-Z][A-Za-z0-9&'().-]*(?:\s+[A-Z][A-Za-z0-9&'().-]*){1,4}",
+                text,
+            )
+
+            for phrase in quoted + titled:
+                cleaned = " ".join(phrase.split()).strip(".,:;!?")
+                if len(cleaned) < 3:
+                    continue
+                key = cleaned.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                phrases.append(cleaned)
+
+            return phrases[:4]
+
+        def augment_plan_steps(base_steps: list[str], original_query: str) -> list[str]:
+            steps: list[str] = []
+            to_add: list[str] = list(base_steps)
+            to_add.append(original_query)
+
+            if is_chain_query(original_query):
+                # Generic chain-task augmentation for multi-hop disambiguation.
+                to_add.append(f"{original_query} site:wikipedia.org")
+
+                key_phrases = extract_key_phrases(original_query)
+                for phrase in key_phrases[:3]:
+                    to_add.append(f'"{phrase}" site:wikipedia.org')
+
+                if len(key_phrases) >= 2:
+                    to_add.append(
+                        f'"{key_phrases[0]}" "{key_phrases[1]}" relationship timeline'
+                    )
+
+                years = re.findall(r"\b(?:19|20)\d{2}\b", original_query)
+                if years:
+                    unique_years = " ".join(dict.fromkeys(years))
+                    to_add.append(f"{original_query} {unique_years} timeline")
+
+                to_add.append(f"{original_query} corroborating sources")
+
+            seen = {s.lower() for s in steps}
+            for step in to_add:
+                key = step.lower()
+                if key not in seen:
+                    seen.add(key)
+                    steps.append(step)
+
+            return steps[:8]
+
         active_client = self.client or llm_client()
         t0 = time.monotonic()
         response = await active_client.messages.create(
@@ -81,6 +171,8 @@ class ResearchOrchestrator:
                 "Given a research query, break it down into "
                 "3-5 specific sub-queries that together will provide comprehensive coverage of the "
                 "topic. Each sub-query should explore a different angle or aspect. "
+                "For chain questions, include explicit entity-resolution steps and at least one "
+                "canonical-source step (e.g. site:wikipedia.org) before downstream steps. "
                 "When the query asks about 'current' or 'latest' data, make sure sub-queries "
                 f"include the current year ({date.today().year}) to find the most recent information.\n\n"
                 "Respond with ONLY a JSON array of strings, no other text. Example:\n"
@@ -90,19 +182,45 @@ class ResearchOrchestrator:
         )
         await self._log_call("orchestrator.plan", response, int((time.monotonic() - t0) * 1000))
 
-        text = response.content[0].text.strip()
+        blocks = getattr(response, "content", None) or []
+        text_parts: list[str] = []
+        for block in blocks:
+            btype = getattr(block, "type", None)
+            btext = getattr(block, "text", None)
+            is_text_like_type = btype in (None, "text") or not isinstance(btype, str)
+            if is_text_like_type and isinstance(btext, str) and btext.strip():
+                text_parts.append(btext)
+
+        if not text_parts:
+            return augment_plan_steps([], query)
+
+        text = "\n".join(text_parts).strip()
         # Extract JSON array from response
         try:
             # Handle case where model wraps in markdown code block
             if text.startswith("```"):
-                text = text.split("```")[1]
+                parts = text.split("```")
+                if len(parts) >= 2:
+                    text = parts[1]
+                else:
+                    raise json.JSONDecodeError("invalid fenced block", text, 0)
                 if text.startswith("json"):
                     text = text[4:]
                 text = text.strip()
-            return json.loads(text)
+            start = text.find("[")
+            end = text.rfind("]")
+            if start >= 0 and end > start:
+                text = text[start : end + 1]
+
+            parsed = normalize(json.loads(text))
+            if is_chain_query(query):
+                return augment_plan_steps(parsed, query)
+            if len(parsed) < 3:
+                return augment_plan_steps(parsed, query)
+            return parsed[:8]
         except (json.JSONDecodeError, IndexError):
-            # Fallback: use the original query as a single plan step
-            return [query]
+            # Fallback: build deterministic chain-aware steps.
+            return augment_plan_steps([], query)
 
     async def _run_parallel_searches(
         self, plan_steps: list[str]
@@ -121,7 +239,7 @@ class ResearchOrchestrator:
         async def run_search(agent: SearchAgent, query: str) -> list[SSEEvent]:
             events: list[SSEEvent] = []
             async for event in agent.run(
-                f"Search for: {query}",
+                query,
                 context=f"This is step {agent.step_index} of the research plan.",
             ):
                 events.append(event)
@@ -153,7 +271,78 @@ class ResearchOrchestrator:
 
         # Sort by score descending, take top N
         sorted_urls = sorted(seen.items(), key=lambda x: x[1], reverse=True)
-        return [url for url, _ in sorted_urls[:max_urls]]
+        selected = [url for url, _ in sorted_urls[:max_urls]]
+
+        # Ensure canonical references (Wikipedia) are represented in scrape set.
+        wiki_candidates = [url for url, _ in sorted_urls if "wikipedia.org" in web_utils.extract_domain(url)]
+        for wiki_url in wiki_candidates[:2]:
+            if wiki_url in selected:
+                continue
+            if len(selected) < max_urls:
+                selected.append(wiki_url)
+                continue
+
+            # Replace the lowest-ranked non-wiki URL so canonical entity pages are scraped.
+            for idx in range(len(selected) - 1, -1, -1):
+                if "wikipedia.org" not in web_utils.extract_domain(selected[idx]):
+                    selected[idx] = wiki_url
+                    break
+
+        return selected
+
+    def _extract_canonical_full_names(
+        self, search_results: list[dict[str, Any]], scraped_content: dict[str, str]
+    ) -> list[str]:
+        """Extract likely full personal names from canonical-source text."""
+        full_names: list[str] = []
+        seen: set[str] = set()
+
+        patterns = [
+            re.compile(r"\b([A-Z][a-z]+(?: [A-Z][a-z]+){2,4})\s*\(born\b"),
+            re.compile(r"\b([A-Z][a-z]+(?: [A-Z][a-z]+){2,4})\s+is an\b"),
+        ]
+
+        def collect_from_text(text: str) -> None:
+            for pattern in patterns:
+                for match in pattern.findall(text):
+                    candidate = " ".join(match.split()).strip()
+                    if len(candidate.split()) < 3:
+                        continue
+                    key = candidate.lower()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    full_names.append(candidate)
+
+        for result in search_results:
+            url = result.get("url", "")
+            if "wikipedia.org" not in web_utils.extract_domain(url):
+                continue
+            title = result.get("title", "")
+            snippet = result.get("content", "")
+            collect_from_text(f"{title} {snippet}")
+
+        for url, content in scraped_content.items():
+            if "wikipedia.org" not in web_utils.extract_domain(url):
+                continue
+            collect_from_text(content[:4000])
+
+        return full_names
+
+    def _promote_full_name_mentions(self, report: str, full_names: list[str]) -> str:
+        """Expand first short-name mention to include canonical full name when available."""
+        updated = report
+        for full_name in full_names:
+            parts = full_name.split()
+            if len(parts) < 3:
+                continue
+            short_name = f"{parts[0]} {parts[-1]}"
+            if full_name.lower() in updated.lower():
+                continue
+            pattern = re.compile(rf"\b{re.escape(short_name)}\b", flags=re.IGNORECASE)
+            if pattern.search(updated):
+                updated = pattern.sub(f"{full_name} ({short_name})", updated, count=1)
+        return updated
 
     async def _run_parallel_scrapes(
         self, urls: list[str]
@@ -215,6 +404,12 @@ class ResearchOrchestrator:
                     f"\n## Content from {domain}\nURL: {url}\n{content[:3000]}"
                 )
 
+        full_names = self._extract_canonical_full_names(search_results, scraped_content)
+        if full_names:
+            context_parts.append("\n# Canonical Name Hints")
+            for name in full_names[:5]:
+                context_parts.append(f"- {name}")
+
         full_context = "\n".join(context_parts)
 
         yield streaming.synthesis_started(len(search_results))
@@ -237,6 +432,8 @@ class ResearchOrchestrator:
                     "content": (
                         f"Based on all the research data provided, write a comprehensive "
                         f"research report on: {query}\n\n"
+                        "If sources provide a person's full name, include the full name explicitly. "
+                        "For songs, include release year when supported by sources. "
                         f"Include citations to sources using [Title](URL) format."
                     ),
                 },
@@ -278,6 +475,8 @@ class ResearchOrchestrator:
                     "url": url,
                     "domain": web_utils.extract_domain(url),
                 })
+
+        full_report = self._promote_full_name_mentions(full_report, full_names)
 
         yield streaming.research_complete(
             report=full_report,

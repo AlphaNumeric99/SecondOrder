@@ -97,8 +97,11 @@ async def stream_research(session_id: UUID):
                 # Persist research steps to Supabase
                 try:
                     if etype == "plan_created":
+                        plan_data = event.data if isinstance(event.data, dict) else {}
+                        if "steps" not in plan_data:
+                            plan_data = {"steps": plan_data.get("steps", []) if isinstance(plan_data, dict) else []}
                         step = await db.create_research_step(
-                            session_id, "plan", {"steps": event.data.get("steps", [])}
+                            session_id, "plan", plan_data
                         )
                         step_ids["plan"] = step["id"]
                         await db.update_research_step(UUID(step["id"]), "completed")
@@ -125,7 +128,22 @@ async def stream_research(session_id: UUID):
                     elif etype == "research_complete":
                         sid = step_ids.get("synthesis")
                         if sid:
-                            await db.update_research_step(UUID(sid), "completed")
+                            await db.update_research_step(
+                                UUID(sid),
+                                "completed",
+                                {
+                                    "tokens_used": event.data.get("tokens_used", 0),
+                                    "sources_count": len(event.data.get("sources", [])),
+                                },
+                            )
+                        await db.create_research_step(
+                            session_id,
+                            "result",
+                            {
+                                "sources": event.data.get("sources", []),
+                                "tokens_used": event.data.get("tokens_used", 0),
+                            },
+                        )
                     elif etype == "error":
                         await db.create_research_step(
                             session_id, "error", event.data

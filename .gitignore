@@ -40,6 +40,10 @@ BUGS.md
 # Misc
 *.log
 *.tmp
+tmp_query_result*.json
+tmp_latest_query_run*.json
+backend/tmp_query_result*.json
+backend/tmp_latest_query_run*.json
 *.sh
 *.bat
 backend/.cache/

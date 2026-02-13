@@ -31,6 +31,19 @@ async def _execute(query: Any) -> Any:
     return await asyncio.to_thread(query.execute)
 
 
+def _coerce_json_object(value: Any) -> dict[str, Any]:
+    """Normalize legacy JSON-string fields into dictionaries."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
 # --- Sessions ---
 
 
@@ -71,7 +84,7 @@ async def create_message(
         "session_id": str(session_id),
         "role": role,
         "content": content,
-        "metadata": json.dumps(metadata or {}),
+        "metadata": metadata or {},
     }
     result = await _execute(client().table("messages").insert(data))
     return result.data[0]
@@ -85,7 +98,10 @@ async def get_messages(session_id: UUID) -> list[dict[str, Any]]:
         .eq("session_id", str(session_id))
         .order("created_at")
     )
-    return result.data or []
+    rows = result.data or []
+    for row in rows:
+        row["metadata"] = _coerce_json_object(row.get("metadata"))
+    return rows
 
 
 # --- Research Steps ---
@@ -97,7 +113,7 @@ async def create_research_step(
     row = {
         "session_id": str(session_id),
         "step_type": step_type,
-        "data": json.dumps(data or {}),
+        "data": data or {},
     }
     result = await _execute(client().table("research_steps").insert(row))
     return result.data[0]
@@ -106,8 +122,22 @@ async def create_research_step(
 async def update_research_step(step_id: UUID, status: str, data: dict | None = None) -> None:
     update = {"status": status}
     if data is not None:
-        update["data"] = json.dumps(data)
+        update["data"] = data
     await _execute(client().table("research_steps").update(update).eq("id", str(step_id)))
+
+
+async def get_research_steps(session_id: UUID) -> list[dict[str, Any]]:
+    result = await _execute(
+        client()
+        .table("research_steps")
+        .select("*")
+        .eq("session_id", str(session_id))
+        .order("created_at")
+    )
+    rows = result.data or []
+    for row in rows:
+        row["data"] = _coerce_json_object(row.get("data"))
+    return rows
 
 
 # --- LLM Calls ---
@@ -131,7 +161,7 @@ async def log_llm_call(
         "output_tokens": output_tokens,
         "total_tokens": input_tokens + output_tokens,
         "status": status,
-        "metadata": json.dumps(metadata or {}),
+        "metadata": metadata or {},
     }
     if session_id:
         row["session_id"] = str(session_id)

@@ -5,6 +5,7 @@ import { startResearch, getStreamUrl } from "@/lib/api";
 import { connectSSE } from "@/lib/sse";
 import type {
   AgentStep,
+  ResearchSnapshot,
   ResearchState,
   SSEEvent,
   Source,
@@ -169,5 +170,36 @@ export function useResearch() {
     setState(initialState);
   }, []);
 
-  return { state, startNewResearch, reset };
+  const hydrateFromSession = useCallback(
+    (sessionId: string, snapshot: ResearchSnapshot | null | undefined) => {
+      if (cleanupRef.current) {
+        cleanupRef.current();
+        cleanupRef.current = null;
+      }
+      stepCounterRef.current = 0;
+
+      if (!snapshot) {
+        setState({ ...initialState, sessionId });
+        return;
+      }
+
+      const normalizedSteps = (snapshot.steps || []).map((step) => ({
+        ...step,
+        id: step.id || `history-step-${stepCounterRef.current++}`,
+      }));
+
+      setState({
+        status: snapshot.status || (snapshot.report ? "complete" : "idle"),
+        sessionId,
+        plan: snapshot.plan || [],
+        steps: normalizedSteps,
+        report: snapshot.report || "",
+        sources: snapshot.sources || [],
+        error: snapshot.error || null,
+      });
+    },
+    [],
+  );
+
+  return { state, startNewResearch, reset, hydrateFromSession };
 }
