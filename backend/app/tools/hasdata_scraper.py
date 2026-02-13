@@ -5,8 +5,10 @@ from dataclasses import dataclass
 import httpx
 
 from app.config import settings
+from app.tools import scrape_cache
 
 HASDATA_BASE_URL = "https://api.hasdata.com/scrape/web"
+SUPPORTED_OUTPUT_FORMATS = {"html", "text", "markdown"}
 
 
 @dataclass
@@ -14,14 +16,48 @@ class ScrapeResult:
     url: str
     content: str
     status_code: int
+    from_cache: bool = False
+
+
+def _resolve_output_format() -> str:
+    fmt = settings.scrape_output_format.lower().strip()
+    if fmt not in SUPPORTED_OUTPUT_FORMATS:
+        return "markdown"
+    return fmt
+
+
+def _extract_content(payload: dict, output_format: str) -> str:
+    if output_format == "markdown":
+        return str(payload.get("markdown") or payload.get("text") or payload.get("content") or "")
+    if output_format == "text":
+        return str(payload.get("text") or payload.get("markdown") or payload.get("content") or "")
+    return str(payload.get("content") or payload.get("html") or payload.get("text") or "")
 
 
 async def scrape(url: str, *, render_js: bool = False) -> ScrapeResult:
     """Scrape a URL using Hasdata API and return cleaned content."""
+    output_format = _resolve_output_format()
+
+    cached = scrape_cache.load(url, render_js=render_js, output_format=output_format)
+    if cached is not None:
+        return ScrapeResult(
+            url=url,
+            content=str(cached["content"]),
+            status_code=int(cached["status_code"]),
+            from_cache=True,
+        )
+
+    request_body = {
+        "url": url,
+        "outputFormat": ["json", output_format],
+    }
+    if render_js:
+        request_body["jsRendering"] = True
+
     async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.get(
+        response = await client.post(
             HASDATA_BASE_URL,
-            params={"url": url, "js_rendering": str(render_js).lower()},
+            json=request_body,
             headers={
                 "x-api-key": settings.hasdata_api_key,
                 "Content-Type": "application/json",
@@ -30,10 +66,24 @@ async def scrape(url: str, *, render_js: bool = False) -> ScrapeResult:
         response.raise_for_status()
         data = response.json()
 
+    content = _extract_content(data if isinstance(data, dict) else {}, output_format)
+    status_code = 200
+    if isinstance(data, dict):
+        status_code = int(data.get("statusCode") or data.get("status_code") or 200)
+
+    scrape_cache.save(
+        url,
+        render_js=render_js,
+        output_format=output_format,
+        content=content,
+        status_code=status_code,
+    )
+
     return ScrapeResult(
         url=url,
-        content=data.get("content", data.get("text", "")),
-        status_code=data.get("status_code", 200),
+        content=content,
+        status_code=status_code,
+        from_cache=False,
     )
 
 

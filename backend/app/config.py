@@ -18,6 +18,10 @@ class Settings(BaseSettings):
 
     # Hasdata
     hasdata_api_key: str
+    scrape_cache_enabled: bool = False
+    scrape_cache_dir: str = ".cache/scrape"
+    scrape_cache_ttl_hours: int = 168
+    scrape_output_format: str = "markdown"  # html | text | markdown
 
     # Supabase
     supabase_url: str

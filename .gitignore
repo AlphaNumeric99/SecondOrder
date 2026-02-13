@@ -42,6 +42,7 @@ BUGS.md
 *.tmp
 *.sh
 *.bat
+backend/.cache/
 
 # Codex workspace
 .codex/
