@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import re
-import shutil
-from functools import lru_cache
-from pathlib import Path
 from dataclasses import dataclass
-from typing import Any
+from functools import lru_cache
+from io import BytesIO
 
 from bs4 import BeautifulSoup
 
@@ -64,7 +62,7 @@ def _looks_low_quality(text: str) -> bool:
     return False
 
 
-def _extract_with_trafilatura(raw_html: str, url: str) -> str:
+def _extract_with_trafilatura(raw_html: str) -> str:
     import trafilatura
 
     extracted = trafilatura.extract(raw_html, output_format="txt")
@@ -73,76 +71,47 @@ def _extract_with_trafilatura(raw_html: str, url: str) -> str:
     return _normalize_text(extracted)
 
 
-def _parse_readabilipy_payload(payload: dict[str, Any]) -> tuple[str, str]:
-    title = ""
-    raw_title = payload.get("title")
-    if isinstance(raw_title, str):
-        title = _normalize_text(raw_title)
-
-    plain_text = payload.get("plain_text")
-    if isinstance(plain_text, list):
-        chunks: list[str] = []
-        for item in plain_text:
-            if isinstance(item, str):
-                chunks.append(item)
-                continue
-            if isinstance(item, dict):
-                text_value = item.get("text")
-                if isinstance(text_value, str):
-                    chunks.append(text_value)
-        normalized = _normalize_text("\n\n".join(chunks))
-        if normalized:
-            return title, normalized
-    if isinstance(plain_text, str):
-        normalized = _normalize_text(plain_text)
-        if normalized:
-            return title, normalized
-
-    content = payload.get("content")
-    if isinstance(content, str):
-        soup = BeautifulSoup(content, "html.parser")
-        return title, _normalize_text(soup.get_text("\n"))
-
-    if isinstance(content, list):
-        chunks: list[str] = []
-        for item in content:
-            if isinstance(item, str):
-                chunks.append(item)
-                continue
-            if isinstance(item, dict):
-                text_value = item.get("text")
-                if isinstance(text_value, str):
-                    chunks.append(text_value)
-        return title, _normalize_text("\n\n".join(chunks))
-
-    return title, ""
-
-
 @lru_cache(maxsize=1)
-def _readabilipy_js_ready() -> bool:
-    try:
-        import readabilipy
-    except Exception:
-        return False
+def _markitdown_converter():
+    from markitdown import MarkItDown
 
-    if shutil.which("node") is None:
-        return False
-
-    js_dir = Path(readabilipy.__file__).resolve().parent / "javascript"
-    node_modules = js_dir / "node_modules"
-    return node_modules.exists()
+    return MarkItDown()
 
 
-def _extract_with_readabilipy(raw_html: str, *, use_readability: bool) -> tuple[str, str]:
-    from readabilipy import simple_json_from_html_string
+def _clean_markitdown_text(markdown_text: str) -> str:
+    text = re.sub(r"<img\b[^>]*>", "", markdown_text, flags=re.IGNORECASE)
+    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text)
+    text = re.sub(r"!\[[^\]]*\]\[[^\]]*\]", "", text)
+    text = re.sub(r"\[([^\]]+)\]\((?:https?:)?//[^)]+\)", r"\1", text)
+    text = re.sub(r"<https?://[^>]+>", "", text)
+    text = re.sub(r"<data:image/[^>]+>", "", text, flags=re.IGNORECASE)
 
-    if use_readability and not _readabilipy_js_ready():
-        use_readability = False
+    cleaned_lines: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            cleaned_lines.append("")
+            continue
+        if re.fullmatch(r"(?:https?://|data:image/\S+)\S*", stripped, flags=re.IGNORECASE):
+            continue
+        if re.fullmatch(
+            r"\[[^\]]+\]:\s*(?:<)?(?:https?://|data:image/)\S+(?:>)?",
+            stripped,
+            flags=re.IGNORECASE,
+        ):
+            continue
+        cleaned_lines.append(stripped)
 
-    payload = simple_json_from_html_string(raw_html, use_readability=use_readability)
-    if not isinstance(payload, dict):
-        return "", ""
-    return _parse_readabilipy_payload(payload)
+    return _normalize_text("\n".join(cleaned_lines))
+
+
+def _extract_with_markitdown(raw_html: str) -> str:
+    converter = _markitdown_converter()
+    result = converter.convert_stream(BytesIO(raw_html.encode("utf-8")), file_extension=".html")
+    text_content = getattr(result, "text_content", "")
+    if not isinstance(text_content, str):
+        return ""
+    return _clean_markitdown_text(text_content)
 
 
 def extract_main_content(
@@ -165,7 +134,7 @@ def extract_main_content(
     seems_html = "<html" in raw_content.lower() or "<body" in raw_content.lower()
     primary_input = raw_content if seems_html else f"<html><body>{raw_content}</body></html>"
 
-    primary_text = _extract_with_trafilatura(primary_input, url)
+    primary_text = _extract_with_trafilatura(primary_input)
     if primary_text and not _looks_low_quality(primary_text):
         clipped = _truncate(primary_text, target_chars)
         return ExtractedContent(
@@ -178,7 +147,7 @@ def extract_main_content(
             extracted_length=len(clipped),
         )
 
-    if fallback_mode != "readabilipy":
+    if fallback_mode == "none":
         normalized = _truncate(_normalize_text(raw_content), target_chars)
         return ExtractedContent(
             url=url,
@@ -190,23 +159,21 @@ def extract_main_content(
             extracted_length=len(normalized),
         )
 
-    for use_readability, method in ((False, "readabilipy_fast"), (True, "readabilipy_js")):
-        try:
-            rb_title, rb_text = _extract_with_readabilipy(primary_input, use_readability=use_readability)
-        except Exception:
-            continue
-        if rb_text and not _looks_low_quality(rb_text):
-            clipped = _truncate(rb_text, target_chars)
-            chosen_title = rb_title or title
-            return ExtractedContent(
-                url=url,
-                title=chosen_title,
-                text=clipped,
-                method=method,
-                fallback_used=True,
-                raw_length=len(raw_content),
-                extracted_length=len(clipped),
-            )
+    try:
+        md_text = _extract_with_markitdown(primary_input)
+    except Exception:
+        md_text = ""
+    if md_text and not _looks_low_quality(md_text):
+        clipped = _truncate(md_text, target_chars)
+        return ExtractedContent(
+            url=url,
+            title=title,
+            text=clipped,
+            method="markitdown",
+            fallback_used=True,
+            raw_length=len(raw_content),
+            extracted_length=len(clipped),
+        )
 
     normalized = _truncate(_normalize_text(raw_content), target_chars)
     return ExtractedContent(

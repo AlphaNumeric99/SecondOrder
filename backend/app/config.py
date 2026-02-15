@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     scrape_cache_ttl_hours: int = 168
     scrape_output_format: str = "html"  # html | text | markdown
     extractor_max_page_chars: int = 120000
-    extractor_fallback: str = "readabilipy"  # readabilipy | none
+    extractor_fallback: str = "markitdown"  # markitdown | none
     extractor_retry_enabled: bool = True
     extractor_retry_max: int = 1
 
