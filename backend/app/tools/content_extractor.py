@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import re
+import shutil
+from functools import lru_cache
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Any
 
@@ -64,15 +67,7 @@ def _looks_low_quality(text: str) -> bool:
 def _extract_with_trafilatura(raw_html: str, url: str) -> str:
     import trafilatura
 
-    extracted = trafilatura.extract(
-        raw_html,
-        output_format="txt",
-        url=url,
-        favor_recall=True,
-        include_comments=False,
-        include_tables=False,
-        deduplicate=True,
-    )
+    extracted = trafilatura.extract(raw_html, output_format="txt")
     if not isinstance(extracted, str):
         return ""
     return _normalize_text(extracted)
@@ -86,10 +81,22 @@ def _parse_readabilipy_payload(payload: dict[str, Any]) -> tuple[str, str]:
 
     plain_text = payload.get("plain_text")
     if isinstance(plain_text, list):
-        joined = "\n\n".join(item for item in plain_text if isinstance(item, str))
-        return title, _normalize_text(joined)
+        chunks: list[str] = []
+        for item in plain_text:
+            if isinstance(item, str):
+                chunks.append(item)
+                continue
+            if isinstance(item, dict):
+                text_value = item.get("text")
+                if isinstance(text_value, str):
+                    chunks.append(text_value)
+        normalized = _normalize_text("\n\n".join(chunks))
+        if normalized:
+            return title, normalized
     if isinstance(plain_text, str):
-        return title, _normalize_text(plain_text)
+        normalized = _normalize_text(plain_text)
+        if normalized:
+            return title, normalized
 
     content = payload.get("content")
     if isinstance(content, str):
@@ -111,8 +118,26 @@ def _parse_readabilipy_payload(payload: dict[str, Any]) -> tuple[str, str]:
     return title, ""
 
 
+@lru_cache(maxsize=1)
+def _readabilipy_js_ready() -> bool:
+    try:
+        import readabilipy
+    except Exception:
+        return False
+
+    if shutil.which("node") is None:
+        return False
+
+    js_dir = Path(readabilipy.__file__).resolve().parent / "javascript"
+    node_modules = js_dir / "node_modules"
+    return node_modules.exists()
+
+
 def _extract_with_readabilipy(raw_html: str, *, use_readability: bool) -> tuple[str, str]:
     from readabilipy import simple_json_from_html_string
+
+    if use_readability and not _readabilipy_js_ready():
+        use_readability = False
 
     payload = simple_json_from_html_string(raw_html, use_readability=use_readability)
     if not isinstance(payload, dict):
@@ -165,7 +190,7 @@ def extract_main_content(
             extracted_length=len(normalized),
         )
 
-    for use_readability, method in ((True, "readabilipy_js"), (False, "readabilipy_fast")):
+    for use_readability, method in ((False, "readabilipy_fast"), (True, "readabilipy_js")):
         try:
             rb_title, rb_text = _extract_with_readabilipy(primary_input, use_readability=use_readability)
         except Exception:
