@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json as _json
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException
@@ -8,8 +9,9 @@ from sse_starlette.sse import EventSourceResponse
 
 from app.agents.orchestrator import ResearchOrchestrator
 from app.llm_client import get_model
-from app.services import streaming
 from app.models.schemas import ResearchRequest, ResearchStartResponse
+from app.services import logger as log_service
+from app.services import streaming
 from app.services import supabase as db
 
 router = APIRouter(prefix="/api/research", tags=["research"])
@@ -17,6 +19,18 @@ router = APIRouter(prefix="/api/research", tags=["research"])
 
 def _event_step_key(event_type: str, data: dict) -> str | None:
     """Build deterministic persistence key for step lifecycle events."""
+    if event_type in ("verification_started", "verification_completed"):
+        task_id = data.get("task_id")
+        if isinstance(task_id, str) and task_id:
+            return f"verification_{task_id}"
+        return "verification_single"
+
+    if event_type in ("mesh_stage_started", "mesh_stage_completed"):
+        stage = data.get("stage")
+        if isinstance(stage, str) and stage:
+            return f"mesh_{stage}"
+        return "mesh_unknown"
+
     if event_type not in ("agent_started", "agent_completed"):
         return None
 
@@ -72,12 +86,9 @@ async def stream_research(session_id: UUID):
     model = session.get("model") or get_model()
 
     async def event_generator():
-        import json as _json
-        from app.services import logger as log_service
-
         log_service.log_event(
             event_type="research_started",
-            message=f"Research started",
+            message="Research started",
             session_id=str(session_id),
             model=model,
             query=query[:100],
@@ -86,6 +97,17 @@ async def stream_research(session_id: UUID):
         orchestrator = ResearchOrchestrator(model=model, session_id=str(session_id))
         final_report = ""
         step_ids: dict[str, str] = {}
+        memory_summary: dict[str, int] = {
+            "inserted_chunks": 0,
+            "deduplicated_chunks": 0,
+            "documents_processed": 0,
+        }
+        verification_counts: dict[str, int] = {
+            "supported": 0,
+            "partially_supported": 0,
+            "unsupported": 0,
+            "total": 0,
+        }
 
         try:
             async for event in orchestrator.research(query):
@@ -99,12 +121,82 @@ async def stream_research(session_id: UUID):
                     if etype == "plan_created":
                         plan_data = event.data if isinstance(event.data, dict) else {}
                         if "steps" not in plan_data:
-                            plan_data = {"steps": plan_data.get("steps", []) if isinstance(plan_data, dict) else []}
+                            plan_data = {
+                                "steps": (
+                                    plan_data.get("steps", [])
+                                    if isinstance(plan_data, dict)
+                                    else []
+                                )
+                            }
                         step = await db.create_research_step(
                             session_id, "plan", plan_data
                         )
                         step_ids["plan"] = step["id"]
                         await db.update_research_step(UUID(step["id"]), "completed")
+                    elif etype == "execution_compiled":
+                        step = await db.create_research_step(
+                            session_id, "execution_graph", event.data
+                        )
+                        step_ids["execution_graph"] = step["id"]
+                        await db.update_research_step(UUID(step["id"]), "completed")
+                    elif etype == "mesh_stage_started":
+                        stage = event.data.get("stage", "unknown")
+                        step_key = _event_step_key(etype, event.data)
+                        step = await db.create_research_step(
+                            session_id, f"mesh_{stage}", event.data
+                        )
+                        if step_key:
+                            step_ids[step_key] = step["id"]
+                        await db.update_research_step(UUID(step["id"]), "running")
+                    elif etype == "mesh_stage_completed":
+                        step_key = _event_step_key(etype, event.data)
+                        sid = step_ids.get(step_key or "")
+                        if sid:
+                            await db.update_research_step(UUID(sid), "completed", event.data)
+                        stage = event.data.get("stage")
+                        if stage == "verify":
+                            summary_step = await db.create_research_step(
+                                session_id,
+                                "verification",
+                                {
+                                    **verification_counts,
+                                    **(event.data if isinstance(event.data, dict) else {}),
+                                },
+                            )
+                            await db.update_research_step(UUID(summary_step["id"]), "completed")
+                    elif etype == "memory_upserted":
+                        inserted = int(event.data.get("inserted_chunks", 0) or 0)
+                        deduped = int(event.data.get("deduplicated_chunks", 0) or 0)
+                        docs = int(event.data.get("documents_processed", 0) or 0)
+                        memory_summary["inserted_chunks"] += inserted
+                        memory_summary["deduplicated_chunks"] += deduped
+                        memory_summary["documents_processed"] += docs
+                        step = await db.create_research_step(
+                            session_id,
+                            "memory",
+                            {
+                                **memory_summary,
+                                **event.data,
+                            },
+                        )
+                        await db.update_research_step(UUID(step["id"]), "completed")
+                    elif etype == "verification_started":
+                        step_key = _event_step_key(etype, event.data)
+                        step = await db.create_research_step(
+                            session_id, "verification_task", event.data
+                        )
+                        if step_key:
+                            step_ids[step_key] = step["id"]
+                        await db.update_research_step(UUID(step["id"]), "running")
+                    elif etype == "verification_completed":
+                        step_key = _event_step_key(etype, event.data)
+                        sid = step_ids.get(step_key or "")
+                        if sid:
+                            await db.update_research_step(UUID(sid), "completed", event.data)
+                        status = event.data.get("status")
+                        if isinstance(status, str):
+                            verification_counts[status] = verification_counts.get(status, 0) + 1
+                            verification_counts["total"] += 1
                     elif etype == "agent_started":
                         agent = event.data.get("agent", "unknown")
                         step_key = _event_step_key(etype, event.data)
@@ -134,6 +226,7 @@ async def stream_research(session_id: UUID):
                                 {
                                     "tokens_used": event.data.get("tokens_used", 0),
                                     "sources_count": len(event.data.get("sources", [])),
+                                    "runtime_ms": event.data.get("runtime_ms"),
                                 },
                             )
                         await db.create_research_step(
@@ -142,6 +235,7 @@ async def stream_research(session_id: UUID):
                             {
                                 "sources": event.data.get("sources", []),
                                 "tokens_used": event.data.get("tokens_used", 0),
+                                "runtime_ms": event.data.get("runtime_ms"),
                             },
                         )
                     elif etype == "error":

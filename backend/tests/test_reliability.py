@@ -24,6 +24,18 @@ def test_event_step_key_is_stable_for_scraper_url():
     assert start_key != other_key
 
 
+def test_event_step_key_supports_mesh_and_verification_keys():
+    mesh_start = _event_step_key("mesh_stage_started", {"stage": "verify"})
+    mesh_done = _event_step_key("mesh_stage_completed", {"stage": "verify"})
+    verify_start = _event_step_key("verification_started", {"task_id": "t1"})
+    verify_done = _event_step_key("verification_completed", {"task_id": "t1"})
+
+    assert mesh_start == "mesh_verify"
+    assert mesh_start == mesh_done
+    assert verify_start == "verification_t1"
+    assert verify_start == verify_done
+
+
 @pytest.mark.asyncio
 async def test_start_research_uses_backend_model_when_missing_from_request():
     session_id = "12345678-1234-5678-1234-567812345678"
@@ -128,18 +140,39 @@ async def test_create_message_writes_metadata_as_object():
 @pytest.mark.asyncio
 async def test_run_parallel_scrapes_emits_completion_per_url():
     from app.agents.orchestrator import ResearchOrchestrator
+    from app.tools.hasdata_scraper import ScrapeResult
 
     urls = ["https://example.com/a", "https://example.com/b"]
 
-    class FakeScraperAgent:
-        def __init__(self, *args, **kwargs):
-            self.scraped_content = {"https://example.com/a": "content a"}
+    def fake_extract(url: str, raw_content: str, max_chars: int):
+        payload = SimpleNamespace()
+        payload.text = "content a" if url.endswith("/a") else ""
+        payload.method = "test"
+        payload.fallback_used = False
+        return payload
 
-        async def run(self, prompt: str):
-            if False:
-                yield None
+    async def fake_scrape(url: str, **kwargs):
+        content = "<html>content a</html>" if url.endswith("/a") else "<html></html>"
+        return ScrapeResult(
+            url=url,
+            content=content,
+            status_code=200,
+            output_format="html",
+            from_cache=True,
+        )
 
-    with patch("app.agents.orchestrator.ScraperAgent", FakeScraperAgent):
+    class DummyAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    with (
+        patch("app.agents.orchestrator.httpx.AsyncClient", return_value=DummyAsyncClient()),
+        patch("app.agents.orchestrator.hasdata_scraper.scrape", new=AsyncMock(side_effect=fake_scrape)),
+        patch("app.agents.orchestrator.content_extractor.extract_main_content", side_effect=fake_extract),
+    ):
         orchestrator = ResearchOrchestrator(model="openai/gpt-4o-mini")
         _, events = await orchestrator._run_parallel_scrapes(urls)
 
@@ -248,6 +281,39 @@ def test_strip_deferred_sections_removes_future_work_heading():
     assert "## Sources" in cleaned
 
 
+def test_should_run_synthesis_review_conditional_thresholds():
+    from app.agents.orchestrator import ResearchNotes, ResearchOrchestrator
+    from app.models.execution import VerificationResult
+
+    orchestrator = ResearchOrchestrator(model="openai/gpt-4o-mini")
+    orchestrator.review_mode = "conditional"
+    orchestrator.review_min_supported_ratio = 0.7
+    orchestrator.review_min_citations = 2
+
+    should_skip = orchestrator._should_run_synthesis_review(
+        notes=ResearchNotes(unresolved_points=[]),
+        search_results=[
+            {"url": "https://example.com/1"},
+            {"url": "https://example.com/2"},
+        ],
+        verification_results=[
+            VerificationResult(task_id="a", status="supported", score=0.9, reason="ok"),
+            VerificationResult(task_id="b", status="supported", score=0.8, reason="ok"),
+        ],
+    )
+    assert should_skip is False
+
+    should_review = orchestrator._should_run_synthesis_review(
+        notes=ResearchNotes(unresolved_points=["Missing key evidence"]),
+        search_results=[{"url": "https://example.com/1"}],
+        verification_results=[
+            VerificationResult(task_id="a", status="supported", score=0.9, reason="ok"),
+            VerificationResult(task_id="b", status="unsupported", score=0.2, reason="no"),
+        ],
+    )
+    assert should_review is True
+
+
 @pytest.mark.asyncio
 async def test_run_parallel_searches_applies_step_offset():
     from app.agents.orchestrator import ResearchOrchestrator
@@ -263,6 +329,7 @@ async def test_run_parallel_searches_applies_step_offset():
 
     with patch("app.agents.orchestrator.SearchAgent", FakeSearchAgent):
         orchestrator = ResearchOrchestrator(model="openai/gpt-4o-mini")
+        orchestrator.search_executor_mode = "agent_loop"
         _, events = await orchestrator._run_parallel_searches(
             ["q1", "q2"], step_offset=5
         )

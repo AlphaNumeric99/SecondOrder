@@ -40,6 +40,7 @@ async def scrape(
     *,
     render_js: bool = False,
     output_format_override: str | None = None,
+    http_client: httpx.AsyncClient | None = None,
 ) -> ScrapeResult:
     """Scrape a URL using Hasdata API and return cleaned content."""
     output_format = _resolve_output_format(output_format_override)
@@ -61,7 +62,7 @@ async def scrape(
     if render_js:
         request_body["jsRendering"] = True
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async def _do_request(client: httpx.AsyncClient) -> dict:
         response = await client.post(
             HASDATA_BASE_URL,
             json=request_body,
@@ -71,7 +72,14 @@ async def scrape(
             },
         )
         response.raise_for_status()
-        data = response.json()
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {}
+
+    if http_client is None:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            data = await _do_request(client)
+    else:
+        data = await _do_request(http_client)
 
     content = _extract_content(data if isinstance(data, dict) else {}, output_format)
     status_code = 200
@@ -104,11 +112,17 @@ async def scrape_multiple(
     """Scrape multiple URLs concurrently."""
     import asyncio
 
-    tasks = [
-        scrape(url, render_js=render_js, output_format_override=output_format_override)
-        for url in urls
-    ]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        tasks = [
+            scrape(
+                url,
+                render_js=render_js,
+                output_format_override=output_format_override,
+                http_client=client,
+            )
+            for url in urls
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
     scraped: list[ScrapeResult] = []
     for r in results:

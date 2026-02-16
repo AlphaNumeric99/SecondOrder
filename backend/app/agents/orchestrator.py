@@ -1,22 +1,31 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import time
+import httpx
 from dataclasses import dataclass, field
 from datetime import date
+from datetime import datetime, timezone
 from typing import Any, AsyncGenerator
 from uuid import UUID
 
 from app.agents.analyzer_agent import AnalyzerAgent
 from app.agents.search_agent import SearchAgent
-from app.agents.scraper_agent import ScraperAgent
+from app.agents.verification_agent import VerificationAgent
+from app.config import settings
 from app.llm_client import client as llm_client, get_model
+from app.models.execution import VerificationResult
+from app.models.memory import MemoryRecord
 from app.models.events import SSEEvent
+from app.services.execution_compiler import compile_execution_graph, graph_summary
+from app.services.memory_store import get_memory_store
+from app.services.search_executor import run_deterministic_searches
 from app.services import streaming
 from app.services import supabase as db
-from app.tools import web_utils
+from app.tools import content_extractor, hasdata_scraper, web_utils
 
 
 @dataclass
@@ -65,10 +74,33 @@ class ResearchOrchestrator:
         self.model = model or get_model()
         self.session_id = session_id
         self.client = None
-        self.max_follow_up_rounds = 2
-        self.max_follow_up_queries_per_round = 3
-        self.max_post_synthesis_review_rounds = 1
-        self.max_post_synthesis_follow_up_queries = 2
+        self.search_executor_mode = str(settings.search_executor_mode).lower().strip()
+        self.search_max_queries_per_step = max(int(settings.search_max_queries_per_step), 1)
+        self.search_max_results_per_query = max(int(settings.search_max_results_per_query), 1)
+        self.search_max_parallel_requests = max(int(settings.search_max_parallel_requests), 1)
+        self.scrape_max_parallel_requests = max(int(settings.scrape_max_parallel_requests), 1)
+        self.extract_in_thread = bool(settings.extract_in_thread)
+        self.synthesis_context_char_budget = max(
+            int(settings.synthesis_context_char_budget), 6000
+        )
+        self.review_mode = str(settings.review_mode).lower().strip()
+        self.review_min_supported_ratio = float(settings.review_min_supported_ratio)
+        self.review_min_citations = max(int(settings.review_min_citations), 1)
+        self.max_follow_up_rounds = max(int(settings.max_follow_up_rounds), 0)
+        self.max_follow_up_queries_per_round = max(
+            int(settings.max_follow_up_queries_per_round), 1
+        )
+        self.max_post_synthesis_review_rounds = max(
+            int(settings.max_post_synthesis_review_rounds), 0
+        )
+        self.max_post_synthesis_follow_up_queries = max(
+            int(settings.max_post_synthesis_follow_up_queries), 1
+        )
+        self.hybrid_mode_enabled = bool(settings.hybrid_mode_enabled)
+        self.hybrid_shadow_mode = bool(settings.hybrid_shadow_mode)
+        self.hybrid_max_parallel_search = int(settings.hybrid_max_parallel_search)
+        self.hybrid_max_parallel_extract = int(settings.hybrid_max_parallel_extract)
+        self.hybrid_max_parallel_verify = int(settings.hybrid_max_parallel_verify)
 
     async def _log_call(self, caller: str, response: Any, elapsed_ms: int) -> None:
         """Log an LLM call to the database and file logs."""
@@ -138,19 +170,69 @@ class ResearchOrchestrator:
             ]
             return sum(1 for m in markers if m in q) >= 3
 
+        def has_recency_request(text: str) -> bool:
+            lowered = text.lower()
+            markers = (
+                "current",
+                "latest",
+                "today",
+                "as of now",
+                "most recent",
+                "recent",
+            )
+            return any(marker in lowered for marker in markers)
+
+        def sanitize_plan_steps(raw_steps: list[str], original_query: str) -> list[str]:
+            query_years = set(re.findall(r"\b(?:19|20)\d{2}\b", original_query))
+            recency_requested = has_recency_request(original_query)
+            blocked_fragments = (
+                "strategies are players using",
+                "analyze the social or economic reasons",
+                "broader implications",
+            )
+
+            filtered: list[str] = []
+            seen: set[str] = set()
+            for step in raw_steps:
+                candidate = " ".join(step.split()).strip()
+                if not candidate:
+                    continue
+                lowered = candidate.lower()
+                if any(fragment in lowered for fragment in blocked_fragments):
+                    continue
+
+                if not recency_requested:
+                    step_years = set(re.findall(r"\b(?:19|20)\d{2}\b", candidate))
+                    if step_years and (step_years - query_years):
+                        continue
+
+                key = lowered
+                if key in seen:
+                    continue
+                seen.add(key)
+                filtered.append(candidate)
+
+            return filtered
+
         def extract_key_phrases(text: str) -> list[str]:
             phrases: list[str] = []
             seen: set[str] = set()
 
             quoted = re.findall(r'"([^"]{2,120})"', text)
-            titled = re.findall(
-                r"\b[A-Z][A-Za-z0-9&'().-]*(?:\s+[A-Z][A-Za-z0-9&'().-]*){1,4}",
-                text,
-            )
+            titled: list[str] = []
+            for segment in re.split(r"[?!;:\n]", text):
+                titled.extend(
+                    re.findall(
+                        r"\b[A-Z][A-Za-z0-9&'().-]*(?:\s+[A-Z][A-Za-z0-9&'().-]*){1,4}",
+                        segment,
+                    )
+                )
 
             for phrase in quoted + titled:
                 cleaned = " ".join(phrase.split()).strip(".,:;!?")
                 if len(cleaned) < 3:
+                    continue
+                if ")" in cleaned or "(" in cleaned:
                     continue
                 key = cleaned.lower()
                 if key in seen:
@@ -245,7 +327,7 @@ class ResearchOrchestrator:
             if start >= 0 and end > start:
                 text = text[start : end + 1]
 
-            parsed = normalize(json.loads(text))
+            parsed = sanitize_plan_steps(normalize(json.loads(text)), query)
             if is_chain_query(query):
                 return augment_plan_steps(parsed, query)
             if len(parsed) < 3:
@@ -258,7 +340,45 @@ class ResearchOrchestrator:
     async def _run_parallel_searches(
         self, plan_steps: list[str], *, step_offset: int = 0
     ) -> tuple[list[dict[str, Any]], list[SSEEvent]]:
-        """Run search agents in parallel for all plan steps."""
+        """Run searches with project-configured execution strategy."""
+        if self.search_executor_mode == "agent_loop":
+            return await self._run_parallel_searches_agent_loop(
+                plan_steps, step_offset=step_offset
+            )
+        return await run_deterministic_searches(
+            plan_steps,
+            step_offset=step_offset,
+            max_parallel=self.search_max_parallel_requests,
+            max_queries_per_step=self.search_max_queries_per_step,
+            max_results_per_query=self.search_max_results_per_query,
+        )
+
+    async def _run_parallel_searches_bounded(
+        self,
+        plan_steps: list[str],
+        *,
+        step_offset: int = 0,
+        max_parallel: int,
+    ) -> tuple[list[dict[str, Any]], list[SSEEvent]]:
+        """Run searches with explicit bounded parallelism."""
+        if self.search_executor_mode == "agent_loop":
+            return await self._run_parallel_searches_bounded_agent_loop(
+                plan_steps,
+                step_offset=step_offset,
+                max_parallel=max_parallel,
+            )
+        return await run_deterministic_searches(
+            plan_steps,
+            step_offset=step_offset,
+            max_parallel=max_parallel,
+            max_queries_per_step=self.search_max_queries_per_step,
+            max_results_per_query=self.search_max_results_per_query,
+        )
+
+    async def _run_parallel_searches_agent_loop(
+        self, plan_steps: list[str], *, step_offset: int = 0
+    ) -> tuple[list[dict[str, Any]], list[SSEEvent]]:
+        """Legacy SearchAgent tool-loop path retained for rollback."""
         all_events: list[SSEEvent] = []
         all_results: list[dict[str, Any]] = []
 
@@ -271,13 +391,11 @@ class ResearchOrchestrator:
             for i in range(len(plan_steps))
         ]
 
-        # Start events
         for i, step in enumerate(plan_steps):
             all_events.append(
                 streaming.agent_started("search", step=step_offset + i, query=step)
             )
 
-        # Run all searches in parallel
         async def run_search(agent: SearchAgent, query: str) -> list[SSEEvent]:
             events: list[SSEEvent] = []
             async for event in agent.run(
@@ -300,14 +418,75 @@ class ResearchOrchestrator:
 
         return all_results, all_events
 
+    async def _run_parallel_searches_bounded_agent_loop(
+        self,
+        plan_steps: list[str],
+        *,
+        step_offset: int = 0,
+        max_parallel: int,
+    ) -> tuple[list[dict[str, Any]], list[SSEEvent]]:
+        """Legacy SearchAgent tool-loop path with explicit concurrency bound."""
+        all_events: list[SSEEvent] = []
+        all_results: list[dict[str, Any]] = []
+        semaphore = asyncio.Semaphore(max(max_parallel, 1))
+
+        for i, step in enumerate(plan_steps):
+            all_events.append(
+                streaming.agent_started("search", step=step_offset + i, query=step)
+            )
+
+        async def run_one(step: str, idx: int) -> tuple[list[dict[str, Any]], list[SSEEvent]]:
+            async with semaphore:
+                agent = SearchAgent(
+                    model=self.model,
+                    step_index=step_offset + idx,
+                    session_id=self.session_id,
+                )
+                events: list[SSEEvent] = []
+                async for event in agent.run(
+                    step, context=f"This is step {agent.step_index} of the research plan."
+                ):
+                    events.append(event)
+                return agent.all_results, events
+
+        raw_results = await asyncio.gather(
+            *(run_one(step, idx) for idx, step in enumerate(plan_steps)),
+            return_exceptions=True,
+        )
+
+        for idx, item in enumerate(raw_results):
+            if isinstance(item, Exception):
+                all_events.append(streaming.error(str(item), agent="search"))
+            else:
+                results, events = item
+                all_results.extend(results)
+                all_events.extend(events)
+            all_events.append(streaming.agent_completed("search", step=step_offset + idx))
+
+        return all_results, all_events
+
     async def _select_top_urls(self, search_results: list[dict[str, Any]], max_urls: int = 8) -> list[str]:
         """Select the top URLs to scrape based on relevance scores."""
+        noisy_domains = {
+            "reddit.com",
+            "www.reddit.com",
+            "tiktok.com",
+            "www.tiktok.com",
+            "youtube.com",
+            "www.youtube.com",
+            "facebook.com",
+            "www.facebook.com",
+            "tokchart.com",
+        }
         # Deduplicate by URL, keep highest score
         seen: dict[str, float] = {}
         for r in search_results:
             url = r.get("url", "")
             score = r.get("score", 0.0)
             if url and web_utils.is_valid_url(url):
+                domain = web_utils.extract_domain(url).lower()
+                if domain in noisy_domains:
+                    continue
                 if url not in seen or score > seen[url]:
                     seen[url] = score
 
@@ -389,36 +568,196 @@ class ResearchOrchestrator:
     async def _run_parallel_scrapes(
         self, urls: list[str]
     ) -> tuple[dict[str, str], list[SSEEvent]]:
-        """Scrape multiple URLs in parallel using scraper agents."""
-        all_events: list[SSEEvent] = []
-        all_content: dict[str, str] = {}
-
-        agent = ScraperAgent(model=self.model, session_id=self.session_id)
-
-        for url in urls:
-            all_events.append(streaming.agent_started("scraper", url=url))
-
-        # Run scraper agent with all URLs
-        prompt = "Scrape the following URLs to extract their content:\n" + "\n".join(
-            f"- {url}" for url in urls
+        """Scrape URLs with configured concurrency using direct Hasdata calls."""
+        return await self._run_parallel_scrapes_bounded(
+            urls,
+            max_parallel=self.scrape_max_parallel_requests,
         )
-        async for event in agent.run(prompt):
-            all_events.append(event)
 
-        all_content = agent.scraped_content
-        # Emit completion per URL to keep start/completion lifecycle consistent.
-        for url in urls:
-            content = all_content.get(url, "")
-            all_events.append(
-                streaming.agent_completed(
-                    "scraper",
-                    url=url,
-                    success=bool(content),
-                    content_length=len(content),
-                )
+    async def _run_parallel_scrapes_bounded(
+        self, urls: list[str], *, max_parallel: int
+    ) -> tuple[dict[str, str], list[SSEEvent]]:
+        """Scrape URLs with explicit concurrency limits."""
+        all_events: list[SSEEvent] = [
+            streaming.agent_started("scraper", url=url) for url in urls
+        ]
+        content_map: dict[str, str] = {}
+        semaphore = asyncio.Semaphore(max(max_parallel, 1))
+
+        def _extract_and_clean(url: str, html: str) -> str:
+            extracted_payload = content_extractor.extract_main_content(
+                url,
+                html,
+                max_chars=settings.extractor_max_page_chars,
+            )
+            return web_utils.clean_content(
+                extracted_payload.text,
+                max_length=settings.extractor_max_page_chars,
             )
 
-        return all_content, all_events
+        async with httpx.AsyncClient(timeout=30.0) as http_client:
+
+            async def run_one(url: str) -> None:
+                async with semaphore:
+                    all_events.append(
+                        streaming.agent_progress("scraper", url=url, status="scraping")
+                    )
+                    extracted = ""
+                    try:
+                        max_attempts = 1
+                        if settings.extractor_retry_enabled:
+                            max_attempts += max(int(settings.extractor_retry_max), 0)
+
+                        for attempt in range(max_attempts):
+                            render_js = attempt > 0
+                            scraped = await hasdata_scraper.scrape(
+                                url,
+                                render_js=render_js,
+                                output_format_override="html",
+                                http_client=http_client,
+                            )
+                            if self.extract_in_thread:
+                                candidate = await asyncio.to_thread(
+                                    _extract_and_clean,
+                                    url,
+                                    scraped.content,
+                                )
+                            else:
+                                candidate = _extract_and_clean(url, scraped.content)
+
+                            if candidate:
+                                extracted = candidate
+                            if extracted and len(extracted) >= 450:
+                                break
+
+                        if extracted:
+                            all_events.append(streaming.scrape_result(url, extracted[:500]))
+                    except Exception as exc:
+                        all_events.append(
+                            streaming.error(f"Failed to scrape {url}: {exc}", agent="scraper")
+                        )
+                    content_map[url] = extracted
+                    all_events.append(
+                        streaming.agent_completed(
+                            "scraper",
+                            url=url,
+                            success=bool(extracted),
+                            content_length=len(extracted),
+                        )
+                    )
+
+            await asyncio.gather(*(run_one(url) for url in urls), return_exceptions=True)
+        return content_map, all_events
+
+    @staticmethod
+    def _chunk_text(text: str, *, chunk_size: int = 1800, overlap: int = 200) -> list[str]:
+        if not text.strip():
+            return []
+        normalized = " ".join(text.split())
+        chunks: list[str] = []
+        start = 0
+        step = max(chunk_size - overlap, 200)
+        while start < len(normalized):
+            chunk = normalized[start : start + chunk_size].strip()
+            if chunk:
+                chunks.append(chunk)
+            start += step
+        return chunks
+
+    async def _upsert_memory_chunks(
+        self,
+        *,
+        scraped_content: dict[str, str],
+        default_step_id: str = "extract",
+    ) -> tuple[dict[str, int], list[SSEEvent]]:
+        if not self.session_id:
+            return {"inserted_chunks": 0, "deduplicated_chunks": 0, "documents_processed": 0}, []
+        store = get_memory_store()
+        now = datetime.now(timezone.utc).isoformat()
+        records: list[MemoryRecord] = []
+        dedupe_seen: set[str] = set()
+
+        for url, text in scraped_content.items():
+            chunks = self._chunk_text(text)
+            for index, chunk in enumerate(chunks):
+                chunk_hash = hashlib.sha1(f"{url}|{chunk}".encode("utf-8")).hexdigest()
+                record_id = f"{chunk_hash}_{index}"
+                if record_id in dedupe_seen:
+                    continue
+                dedupe_seen.add(record_id)
+                records.append(
+                    MemoryRecord(
+                        id=record_id,
+                        session_id=self.session_id,
+                        step_id=default_step_id,
+                        url=url,
+                        text=chunk,
+                        chunk_hash=chunk_hash,
+                        created_at=now,
+                    )
+                )
+
+        result = await store.upsert(records)
+        payload = {
+            "inserted_chunks": int(result.inserted),
+            "deduplicated_chunks": int(result.deduplicated),
+            "documents_processed": len(scraped_content),
+        }
+        return payload, [streaming.memory_upserted(**payload)]
+
+    async def _run_verification_stage(
+        self, *, query: str, plan_steps: list[str]
+    ) -> tuple[list[VerificationResult], list[SSEEvent]]:
+        if not self.session_id:
+            return [], []
+        store = get_memory_store()
+        verifier = VerificationAgent()
+        tasks = verifier.build_tasks(query, plan_steps, max_tasks=10)
+        events: list[SSEEvent] = []
+        for task in tasks:
+            events.append(
+                streaming.verification_started(
+                    task_id=task.id,
+                    claim=task.claim,
+                    step_id=task.step_id,
+                )
+            )
+        results = await verifier.verify_tasks(
+            query=query,
+            tasks=tasks,
+            session_id=self.session_id,
+            memory_store=store,
+            max_parallel=self.hybrid_max_parallel_verify,
+        )
+        for result in results:
+            events.append(
+                streaming.verification_completed(
+                    task_id=result.task_id,
+                    status=result.status,
+                    score=result.score,
+                    reason=result.reason,
+                    citations=result.citations,
+                )
+            )
+        return results, events
+
+    @staticmethod
+    def _verification_summary(results: list[VerificationResult]) -> dict[str, Any]:
+        summary = {
+            "total": len(results),
+            "supported": 0,
+            "partially_supported": 0,
+            "unsupported": 0,
+            "avg_score": 0.0,
+        }
+        if not results:
+            return summary
+        total_score = 0.0
+        for result in results:
+            summary[result.status] = summary.get(result.status, 0) + 1
+            total_score += float(result.score)
+        summary["avg_score"] = round(total_score / len(results), 4)
+        return summary
 
     @staticmethod
     def _normalize_text_list(
@@ -494,6 +833,43 @@ class ResearchOrchestrator:
             merged.append(result)
         return merged
 
+    @staticmethod
+    def _sanitize_search_results(
+        results: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        noisy_domains = {
+            "reddit.com",
+            "www.reddit.com",
+            "tiktok.com",
+            "www.tiktok.com",
+            "youtube.com",
+            "www.youtube.com",
+            "facebook.com",
+            "www.facebook.com",
+            "tokchart.com",
+            "huggingface.co",
+        }
+        by_url: dict[str, dict[str, Any]] = {}
+        for result in results:
+            url = result.get("url")
+            if not isinstance(url, str) or not web_utils.is_valid_url(url):
+                continue
+            domain = web_utils.extract_domain(url).lower()
+            if domain in noisy_domains:
+                continue
+            previous = by_url.get(url)
+            if previous is None or float(result.get("score", 0.0) or 0.0) > float(
+                previous.get("score", 0.0) or 0.0
+            ):
+                by_url[url] = result
+
+        ordered = sorted(
+            by_url.values(),
+            key=lambda item: float(item.get("score", 0.0) or 0.0),
+            reverse=True,
+        )
+        return ordered
+
     def _fallback_follow_up_queries(
         self, query: str, unresolved_points: list[str]
     ) -> list[str]:
@@ -540,17 +916,17 @@ class ResearchOrchestrator:
         active_client = self.client or llm_client()
 
         search_evidence: list[str] = []
-        for i, result in enumerate(search_results[:14]):
+        for i, result in enumerate(search_results[:12]):
             title = result.get("title", "Untitled")
             url = result.get("url", "")
-            snippet = str(result.get("content", ""))[:320]
+            snippet = str(result.get("content", ""))[:260]
             search_evidence.append(
                 f"{i + 1}. title={title}\nurl={url}\nsnippet={snippet}"
             )
 
         scrape_evidence: list[str] = []
         for i, (url, content) in enumerate(list(scraped_content.items())[:5]):
-            excerpt = " ".join(content.split())[:4000]
+            excerpt = " ".join(content.split())[:1800]
             scrape_evidence.append(f"{i + 1}. url={url}\nexcerpt={excerpt}")
 
         previous_payload = previous_notes.to_dict() if previous_notes else {}
@@ -701,6 +1077,34 @@ class ResearchOrchestrator:
         curr_follow = {item.lower() for item in current.follow_up_queries}
         return curr_unresolved == prev_unresolved and curr_follow.issubset(prev_follow)
 
+    def _should_run_synthesis_review(
+        self,
+        *,
+        notes: ResearchNotes | None,
+        search_results: list[dict[str, Any]],
+        verification_results: list[VerificationResult] | None = None,
+    ) -> bool:
+        mode = self.review_mode
+        if mode == "off":
+            return False
+        if mode == "always":
+            return True
+
+        if notes and notes.unresolved_points:
+            return True
+        if len(search_results) < self.review_min_citations:
+            return True
+
+        if verification_results:
+            total = len(verification_results)
+            if total > 0:
+                supported = sum(1 for r in verification_results if r.status == "supported")
+                ratio = supported / total
+                if ratio < self.review_min_supported_ratio:
+                    return True
+
+        return False
+
     @staticmethod
     def _strip_deferred_sections(report: str) -> str:
         """Remove trailing sections that defer work to future investigation."""
@@ -748,51 +1152,108 @@ class ResearchOrchestrator:
         notes: ResearchNotes | None,
     ) -> tuple[str, list[str]]:
         today = date.today()
-        context_parts = [
-            f"# Current Date\n{today.isoformat()} ({today.year})\n",
-            f"# Original Research Query\n{query}\n",
-        ]
+        budget = self.synthesis_context_char_budget
+        context_parts: list[str] = []
+        used_chars = 0
 
-        context_parts.append("# Search Results Summary")
-        for i, result in enumerate(search_results[:20]):
-            context_parts.append(
-                f"\n## Source {i+1}: [{result.get('title', 'Untitled')}]({result.get('url', '')})\n"
-                f"{result.get('content', '')[:500]}"
+        def append_with_budget(text: str) -> None:
+            nonlocal used_chars
+            if not text or used_chars >= budget:
+                return
+            remaining = budget - used_chars
+            chunk = text if len(text) <= remaining else text[:remaining]
+            context_parts.append(chunk)
+            used_chars += len(chunk)
+
+        append_with_budget(f"# Current Date\n{today.isoformat()} ({today.year})\n")
+        append_with_budget(f"\n# Original Research Query\n{query}\n")
+
+        append_with_budget("\n# Search Results Summary\n")
+        for index, result in enumerate(search_results[:20]):
+            title = str(result.get("title", "Untitled"))
+            url = str(result.get("url", ""))
+            snippet = str(result.get("content", ""))[:300]
+            append_with_budget(
+                f"\n## Source {index + 1}: [{title}]({url})\n{snippet}\n"
             )
 
         if scraped_content:
-            context_parts.append("\n# Detailed Content from Top Sources")
-            for url, content in list(scraped_content.items())[:8]:
+            score_by_url: dict[str, float] = {}
+            for result in search_results:
+                url = result.get("url")
+                if not isinstance(url, str):
+                    continue
+                score = float(result.get("score", 0.0) or 0.0)
+                if url not in score_by_url or score > score_by_url[url]:
+                    score_by_url[url] = score
+
+            ordered_scraped = sorted(
+                scraped_content.items(),
+                key=lambda item: score_by_url.get(item[0], 0.0),
+                reverse=True,
+            )
+            append_with_budget("\n# Detailed Content from Top Sources\n")
+            for url, content in ordered_scraped[:10]:
                 domain = web_utils.extract_domain(url)
-                context_parts.append(
-                    f"\n## Content from {domain}\nURL: {url}\n{content[:12000]}"
+                excerpt = content[:2200]
+                append_with_budget(
+                    f"\n## Content from {domain}\nURL: {url}\n{excerpt}\n"
                 )
 
         full_names = self._extract_canonical_full_names(search_results, scraped_content)
         if full_names:
-            context_parts.append("\n# Canonical Name Hints")
+            append_with_budget("\n# Canonical Name Hints\n")
             for name in full_names[:5]:
-                context_parts.append(f"- {name}")
+                append_with_budget(f"- {name}\n")
 
         if notes:
-            context_parts.append("\n# Working Research Notes")
+            append_with_budget("\n# Working Research Notes\n")
             if notes.highlights:
-                context_parts.append("## Highlights")
-                context_parts.extend(f"- {item}" for item in notes.highlights)
+                append_with_budget("## Highlights\n")
+                for item in notes.highlights[:8]:
+                    append_with_budget(f"- {item}\n")
             if notes.resolved_points:
-                context_parts.append("\n## Resolved Points")
-                context_parts.extend(f"- {item}" for item in notes.resolved_points)
+                append_with_budget("\n## Resolved Points\n")
+                for item in notes.resolved_points[:6]:
+                    append_with_budget(f"- {item}\n")
             if notes.unresolved_points:
-                context_parts.append("\n## Unresolved Points")
-                context_parts.extend(f"- {item}" for item in notes.unresolved_points)
+                append_with_budget("\n## Unresolved Points\n")
+                for item in notes.unresolved_points[:6]:
+                    append_with_budget(f"- {item}\n")
             if notes.follow_up_queries:
-                context_parts.append("\n## Follow-up Queries Already Planned/Run")
-                context_parts.extend(f"- {item}" for item in notes.follow_up_queries)
+                append_with_budget("\n## Follow-up Queries Already Planned/Run\n")
+                for item in notes.follow_up_queries[:6]:
+                    append_with_budget(f"- {item}\n")
 
-        return "\n".join(context_parts), full_names
+        return "".join(context_parts), full_names
 
     @staticmethod
     def _build_synthesis_instruction(query: str) -> str:
+        lowered = query.lower()
+        strict_markers = (
+            "only provide",
+            "do not list any other information",
+            "do not provide any other information",
+            "return only",
+        )
+        if any(marker in lowered for marker in strict_markers):
+            if "bulleted list" in lowered:
+                format_rule = (
+                    "Return only the requested bullet list and nothing else. "
+                    "No preface, no conclusion, no extra notes."
+                )
+            else:
+                format_rule = (
+                    "Return only the final answer items and nothing else. "
+                    "Use a concise comma-separated list unless the query explicitly requests another format. "
+                    "No title, no explanation, no extra commentary."
+                )
+            return (
+                f"Answer this query directly: {query}\n\n"
+                f"{format_rule} "
+                "If evidence is uncertain, provide only the best-supported answer items."
+            )
+
         return (
             f"Based on all the research data provided, write a comprehensive "
             f"research report on: {query}\n\n"
@@ -837,7 +1298,7 @@ class ResearchOrchestrator:
         t0 = time.monotonic()
         response = await active_client.messages.create(
             model=self.model,
-            max_tokens=4096,
+            max_tokens=2600,
             system=AnalyzerAgent.get_system_prompt(),
             messages=self._build_synthesis_messages(query, full_context),
         )
@@ -951,6 +1412,7 @@ class ResearchOrchestrator:
         search_results: list[dict],
         scraped_content: dict[str, str],
         notes: ResearchNotes | None = None,
+        pipeline_started_at: float | None = None,
     ) -> AsyncGenerator[SSEEvent, None]:
         """Feed all collected data to analyzer for synthesis, streaming the response."""
         full_context, full_names = self._build_synthesis_context(
@@ -1010,16 +1472,21 @@ class ResearchOrchestrator:
 
         full_report = self._promote_full_name_mentions(full_report, full_names)
         full_report = self._strip_deferred_sections(full_report)
+        runtime_ms: int | None = None
+        if pipeline_started_at is not None:
+            runtime_ms = int((time.monotonic() - pipeline_started_at) * 1000)
 
         yield streaming.research_complete(
             report=full_report,
             sources=sources[:20],
             tokens_used=tokens_used,
+            runtime_ms=runtime_ms,
         )
 
-    async def research(self, query: str) -> AsyncGenerator[SSEEvent, None]:
+    async def _research_legacy(self, query: str) -> AsyncGenerator[SSEEvent, None]:
         """Execute the full research pipeline, yielding SSE events throughout."""
         try:
+            pipeline_started_at = time.monotonic()
             # Step 1: Generate research plan
             plan_steps = await self._generate_plan(query)
             yield streaming.plan_created(plan_steps)
@@ -1032,6 +1499,7 @@ class ResearchOrchestrator:
             search_results, search_events = await self._run_parallel_searches(
                 plan_steps, step_offset=search_step_offset
             )
+            search_results = self._sanitize_search_results(search_results)
             search_step_offset += len(plan_steps)
             for event in search_events:
                 yield event
@@ -1076,8 +1544,8 @@ class ResearchOrchestrator:
                     yield event
 
                 if follow_up_results:
-                    search_results = self._merge_search_results(
-                        search_results, follow_up_results
+                    search_results = self._sanitize_search_results(
+                        self._merge_search_results(search_results, follow_up_results)
                     )
                     new_urls = await self._select_top_urls(
                         follow_up_results, max_urls=4
@@ -1109,90 +1577,412 @@ class ResearchOrchestrator:
                 if not notes.unresolved_points:
                     break
 
-            for review_round in range(1, self.max_post_synthesis_review_rounds + 1):
-                yield streaming.agent_progress(
-                    "analyzer",
-                    status="reviewing_draft",
-                    iteration=review_round,
-                )
-                draft_report = await self._generate_draft_report(
-                    query,
-                    search_results,
-                    scraped_content,
-                    notes,
-                )
-                review = await self._review_report_sufficiency(
-                    query,
-                    draft_report,
-                    notes,
-                )
-                await self._persist_synthesis_review(review, iteration=review_round)
+            if self._should_run_synthesis_review(
+                notes=notes,
+                search_results=search_results,
+            ):
+                for review_round in range(1, self.max_post_synthesis_review_rounds + 1):
+                    yield streaming.agent_progress(
+                        "analyzer",
+                        status="reviewing_draft",
+                        iteration=review_round,
+                    )
+                    draft_report = await self._generate_draft_report(
+                        query,
+                        search_results,
+                        scraped_content,
+                        notes,
+                    )
+                    review = await self._review_report_sufficiency(
+                        query,
+                        draft_report,
+                        notes,
+                    )
+                    await self._persist_synthesis_review(review, iteration=review_round)
 
-                if not review.needs_more_research:
-                    break
+                    if not review.needs_more_research:
+                        break
 
-                yield streaming.agent_progress(
-                    "analyzer",
-                    status="additional_research_required",
-                    iteration=review_round,
-                    reason=review.reason,
-                    missing_points=review.missing_points,
+                    yield streaming.agent_progress(
+                        "analyzer",
+                        status="additional_research_required",
+                        iteration=review_round,
+                        reason=review.reason,
+                        missing_points=review.missing_points,
+                    )
+
+                    query_candidates = list(review.follow_up_queries)
+                    if notes:
+                        query_candidates.extend(notes.follow_up_queries)
+
+                    post_queries: list[str] = []
+                    for candidate in query_candidates:
+                        key = " ".join(candidate.lower().split())
+                        if not key or key in searched_query_keys:
+                            continue
+                        searched_query_keys.add(key)
+                        post_queries.append(candidate)
+                        if len(post_queries) >= self.max_post_synthesis_follow_up_queries:
+                            break
+
+                    if not post_queries:
+                        break
+
+                    post_results, post_search_events = await self._run_parallel_searches(
+                        post_queries,
+                        step_offset=search_step_offset,
+                    )
+                    search_step_offset += len(post_queries)
+                    for event in post_search_events:
+                        yield event
+
+                    if post_results:
+                        search_results = self._sanitize_search_results(
+                            self._merge_search_results(search_results, post_results)
+                        )
+                        post_urls = await self._select_top_urls(post_results, max_urls=4)
+                        urls_to_scrape = [url for url in post_urls if url not in scraped_content]
+                        if urls_to_scrape:
+                            extra_scraped, extra_scrape_events = await self._run_parallel_scrapes(
+                                urls_to_scrape
+                            )
+                            for event in extra_scrape_events:
+                                yield event
+                            scraped_content.update(extra_scraped)
+
+                    notes = await self._capture_research_notes(
+                        query,
+                        search_results,
+                        scraped_content,
+                        previous_notes=notes,
+                    )
+                    await self._persist_research_notes(
+                        notes,
+                        phase="post_synthesis_follow_up",
+                        iteration=review_round,
+                    )
+
+            # Step 5: Synthesis — streamed
+            async for event in self._synthesize(
+                query,
+                search_results,
+                scraped_content,
+                notes,
+                pipeline_started_at=pipeline_started_at,
+            ):
+                yield event
+
+        except Exception as e:
+            yield streaming.error(f"Research failed: {e}")
+
+    async def _research_hybrid(self, query: str) -> AsyncGenerator[SSEEvent, None]:
+        """Hybrid execution: staged backbone with bounded parallel mesh internals."""
+        try:
+            pipeline_started_at = time.monotonic()
+            plan_steps = await self._generate_plan(query)
+            yield streaming.plan_created(plan_steps)
+
+            execution_graph = compile_execution_graph(query, plan_steps)
+            graph_meta = {
+                **graph_summary(execution_graph),
+                "mode": "hybrid",
+                "shadow_mode": self.hybrid_shadow_mode,
+            }
+            yield streaming.execution_compiled(graph_meta)
+
+            # Stage: search
+            search_stage_started = time.monotonic()
+            yield streaming.mesh_stage_started(
+                "search",
+                node_count=graph_meta.get("search_nodes", len(plan_steps)),
+                max_parallel=self.hybrid_max_parallel_search,
+            )
+            search_results, search_events = await self._run_parallel_searches_bounded(
+                plan_steps,
+                step_offset=0,
+                max_parallel=self.hybrid_max_parallel_search,
+            )
+            search_results = self._sanitize_search_results(search_results)
+            for event in search_events:
+                yield event
+            if not search_results:
+                yield streaming.error("No search results found. Try refining your query.")
+                return
+            yield streaming.mesh_stage_completed(
+                "search",
+                results_count=len(search_results),
+                query_count=len(plan_steps),
+                duration_ms=int((time.monotonic() - search_stage_started) * 1000),
+            )
+
+            # Stage: extraction
+            top_urls = await self._select_top_urls(search_results)
+            extract_stage_started = time.monotonic()
+            yield streaming.mesh_stage_started(
+                "extract",
+                url_count=len(top_urls),
+                max_parallel=self.hybrid_max_parallel_extract,
+            )
+            scraped_content: dict[str, str] = {}
+            if top_urls:
+                scraped_content, scrape_events = await self._run_parallel_scrapes_bounded(
+                    top_urls,
+                    max_parallel=self.hybrid_max_parallel_extract,
                 )
+                for event in scrape_events:
+                    yield event
+            successful_scrapes = sum(1 for content in scraped_content.values() if content)
+            yield streaming.mesh_stage_completed(
+                "extract",
+                attempted=len(top_urls),
+                successful=successful_scrapes,
+                url_count=len(top_urls),
+                duration_ms=int((time.monotonic() - extract_stage_started) * 1000),
+            )
 
-                query_candidates = list(review.follow_up_queries)
-                if notes:
-                    query_candidates.extend(notes.follow_up_queries)
+            # Memory upsert summary
+            memory_payload, memory_events = await self._upsert_memory_chunks(
+                scraped_content=scraped_content
+            )
+            for event in memory_events:
+                yield event
 
-                post_queries: list[str] = []
-                for candidate in query_candidates:
+            # Stage: verification
+            verify_stage_started = time.monotonic()
+            yield streaming.mesh_stage_started(
+                "verify",
+                max_parallel=self.hybrid_max_parallel_verify,
+            )
+            verification_task = asyncio.create_task(
+                self._run_verification_stage(
+                    query=query,
+                    plan_steps=plan_steps,
+                )
+            )
+            notes_task = asyncio.create_task(
+                self._capture_research_notes(query, search_results, scraped_content)
+            )
+
+            verification_outcome, notes_outcome = await asyncio.gather(
+                verification_task,
+                notes_task,
+                return_exceptions=True,
+            )
+            if isinstance(verification_outcome, Exception):
+                verification_results = []
+                verification_events = [
+                    streaming.error(
+                        f"Verification stage failed: {verification_outcome}",
+                        agent="verification",
+                    )
+                ]
+            else:
+                verification_results, verification_events = verification_outcome
+
+            if isinstance(notes_outcome, Exception):
+                notes = self._fallback_notes(query, search_results)
+            else:
+                notes = notes_outcome
+
+            for event in verification_events:
+                yield event
+            verification_payload = self._verification_summary(verification_results)
+            yield streaming.mesh_stage_completed(
+                "verify",
+                **verification_payload,
+                duration_ms=int((time.monotonic() - verify_stage_started) * 1000),
+            )
+
+            # Continue with deterministic notes/follow-up/review pipeline.
+            searched_query_keys = {
+                " ".join(step.lower().split()) for step in plan_steps if step.strip()
+            }
+            search_step_offset = len(plan_steps)
+            await self._persist_research_notes(notes, phase="hybrid_initial", iteration=0)
+
+            for round_index in range(1, self.max_follow_up_rounds + 1):
+                follow_up_queries: list[str] = []
+                for candidate in notes.follow_up_queries:
                     key = " ".join(candidate.lower().split())
                     if not key or key in searched_query_keys:
                         continue
                     searched_query_keys.add(key)
-                    post_queries.append(candidate)
-                    if len(post_queries) >= self.max_post_synthesis_follow_up_queries:
+                    follow_up_queries.append(candidate)
+                    if len(follow_up_queries) >= self.max_follow_up_queries_per_round:
                         break
 
-                if not post_queries:
+                if not follow_up_queries:
                     break
 
-                post_results, post_search_events = await self._run_parallel_searches(
-                    post_queries,
+                follow_up_results, follow_up_events = await self._run_parallel_searches_bounded(
+                    follow_up_queries,
                     step_offset=search_step_offset,
+                    max_parallel=self.hybrid_max_parallel_search,
                 )
-                search_step_offset += len(post_queries)
-                for event in post_search_events:
+                search_step_offset += len(follow_up_queries)
+                for event in follow_up_events:
                     yield event
 
-                if post_results:
-                    search_results = self._merge_search_results(search_results, post_results)
-                    post_urls = await self._select_top_urls(post_results, max_urls=4)
-                    urls_to_scrape = [url for url in post_urls if url not in scraped_content]
+                if follow_up_results:
+                    search_results = self._sanitize_search_results(
+                        self._merge_search_results(search_results, follow_up_results)
+                    )
+                    new_urls = await self._select_top_urls(follow_up_results, max_urls=4)
+                    urls_to_scrape = [url for url in new_urls if url not in scraped_content]
                     if urls_to_scrape:
-                        extra_scraped, extra_scrape_events = await self._run_parallel_scrapes(
-                            urls_to_scrape
+                        extra_scraped, extra_scrape_events = await self._run_parallel_scrapes_bounded(
+                            urls_to_scrape,
+                            max_parallel=self.hybrid_max_parallel_extract,
                         )
                         for event in extra_scrape_events:
                             yield event
                         scraped_content.update(extra_scraped)
 
-                notes = await self._capture_research_notes(
+                        extra_memory_payload, extra_memory_events = await self._upsert_memory_chunks(
+                            scraped_content=extra_scraped,
+                            default_step_id=f"extract_follow_up_{round_index}",
+                        )
+                        memory_payload["inserted_chunks"] += extra_memory_payload["inserted_chunks"]
+                        memory_payload["deduplicated_chunks"] += extra_memory_payload["deduplicated_chunks"]
+                        memory_payload["documents_processed"] += extra_memory_payload["documents_processed"]
+                        for event in extra_memory_events:
+                            yield event
+
+                updated_notes = await self._capture_research_notes(
                     query,
                     search_results,
                     scraped_content,
                     previous_notes=notes,
                 )
                 await self._persist_research_notes(
-                    notes,
-                    phase="post_synthesis_follow_up",
-                    iteration=review_round,
+                    updated_notes,
+                    phase="hybrid_follow_up",
+                    iteration=round_index,
                 )
+                if self._notes_stabilized(notes, updated_notes):
+                    notes = updated_notes
+                    break
+                notes = updated_notes
+                if not notes.unresolved_points:
+                    break
 
-            # Step 5: Synthesis — streamed
+            if self._should_run_synthesis_review(
+                notes=notes,
+                search_results=search_results,
+                verification_results=verification_results,
+            ):
+                for review_round in range(1, self.max_post_synthesis_review_rounds + 1):
+                    yield streaming.agent_progress(
+                        "analyzer",
+                        status="reviewing_draft",
+                        iteration=review_round,
+                    )
+                    draft_report = await self._generate_draft_report(
+                        query,
+                        search_results,
+                        scraped_content,
+                        notes,
+                    )
+                    review = await self._review_report_sufficiency(query, draft_report, notes)
+                    await self._persist_synthesis_review(review, iteration=review_round)
+                    if not review.needs_more_research:
+                        break
+
+                    yield streaming.agent_progress(
+                        "analyzer",
+                        status="additional_research_required",
+                        iteration=review_round,
+                        reason=review.reason,
+                        missing_points=review.missing_points,
+                    )
+
+                    query_candidates = list(review.follow_up_queries)
+                    if notes:
+                        query_candidates.extend(notes.follow_up_queries)
+
+                    post_queries: list[str] = []
+                    for candidate in query_candidates:
+                        key = " ".join(candidate.lower().split())
+                        if not key or key in searched_query_keys:
+                            continue
+                        searched_query_keys.add(key)
+                        post_queries.append(candidate)
+                        if len(post_queries) >= self.max_post_synthesis_follow_up_queries:
+                            break
+
+                    if not post_queries:
+                        break
+
+                    post_results, post_events = await self._run_parallel_searches_bounded(
+                        post_queries,
+                        step_offset=search_step_offset,
+                        max_parallel=self.hybrid_max_parallel_search,
+                    )
+                    search_step_offset += len(post_queries)
+                    for event in post_events:
+                        yield event
+
+                    if post_results:
+                        search_results = self._sanitize_search_results(
+                            self._merge_search_results(search_results, post_results)
+                        )
+                        post_urls = await self._select_top_urls(post_results, max_urls=4)
+                        urls_to_scrape = [url for url in post_urls if url not in scraped_content]
+                        if urls_to_scrape:
+                            extra_scraped, extra_scrape_events = await self._run_parallel_scrapes_bounded(
+                                urls_to_scrape,
+                                max_parallel=self.hybrid_max_parallel_extract,
+                            )
+                            for event in extra_scrape_events:
+                                yield event
+                            scraped_content.update(extra_scraped)
+
+                            extra_memory_payload, extra_memory_events = await self._upsert_memory_chunks(
+                                scraped_content=extra_scraped,
+                                default_step_id=f"extract_review_{review_round}",
+                            )
+                            memory_payload["inserted_chunks"] += extra_memory_payload["inserted_chunks"]
+                            memory_payload["deduplicated_chunks"] += extra_memory_payload["deduplicated_chunks"]
+                            memory_payload["documents_processed"] += extra_memory_payload["documents_processed"]
+                            for event in extra_memory_events:
+                                yield event
+
+                    notes = await self._capture_research_notes(
+                        query,
+                        search_results,
+                        scraped_content,
+                        previous_notes=notes,
+                    )
+                    await self._persist_research_notes(
+                        notes,
+                        phase="hybrid_post_synthesis_follow_up",
+                        iteration=review_round,
+                    )
+
+            if not self.hybrid_shadow_mode and verification_results:
+                notes.highlights.append(
+                    "Verification summary: "
+                    f"{verification_payload.get('supported', 0)} supported, "
+                    f"{verification_payload.get('partially_supported', 0)} partially supported, "
+                    f"{verification_payload.get('unsupported', 0)} unsupported."
+                )
+                notes.highlights = self._normalize_text_list(notes.highlights, max_items=12, min_len=3)
+
             async for event in self._synthesize(
-                query, search_results, scraped_content, notes
+                query,
+                search_results,
+                scraped_content,
+                notes,
+                pipeline_started_at=pipeline_started_at,
             ):
                 yield event
-
         except Exception as e:
-            yield streaming.error(f"Research failed: {e}")
+            yield streaming.error(f"Hybrid research failed: {e}")
+
+    async def research(self, query: str) -> AsyncGenerator[SSEEvent, None]:
+        if self.hybrid_mode_enabled:
+            async for event in self._research_hybrid(query):
+                yield event
+            return
+        async for event in self._research_legacy(query):
+            yield event

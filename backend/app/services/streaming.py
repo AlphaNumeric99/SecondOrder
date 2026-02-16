@@ -9,6 +9,30 @@ def plan_created(steps: list[str]) -> SSEEvent:
     return SSEEvent(event=EventType.PLAN_CREATED, data={"steps": steps})
 
 
+def execution_compiled(summary: dict[str, Any]) -> SSEEvent:
+    return SSEEvent(event=EventType.EXECUTION_COMPILED, data=summary)
+
+
+def mesh_stage_started(stage: str, **kwargs: Any) -> SSEEvent:
+    return SSEEvent(event=EventType.MESH_STAGE_STARTED, data={"stage": stage, **kwargs})
+
+
+def mesh_stage_completed(stage: str, **kwargs: Any) -> SSEEvent:
+    return SSEEvent(event=EventType.MESH_STAGE_COMPLETED, data={"stage": stage, **kwargs})
+
+
+def memory_upserted(**kwargs: Any) -> SSEEvent:
+    return SSEEvent(event=EventType.MEMORY_UPSERTED, data=kwargs)
+
+
+def verification_started(**kwargs: Any) -> SSEEvent:
+    return SSEEvent(event=EventType.VERIFICATION_STARTED, data=kwargs)
+
+
+def verification_completed(**kwargs: Any) -> SSEEvent:
+    return SSEEvent(event=EventType.VERIFICATION_COMPLETED, data=kwargs)
+
+
 def agent_started(agent: str, step: int | None = None, **kwargs: Any) -> SSEEvent:
     data: dict[str, Any] = {"agent": agent}
     if step is not None:
@@ -44,7 +68,10 @@ def search_result(
 
 
 def scrape_result(url: str, content_preview: str) -> SSEEvent:
-    return SSEEvent(event=EventType.SCRAPE_RESULT, data={"url": url, "content_preview": content_preview})
+    return SSEEvent(
+        event=EventType.SCRAPE_RESULT,
+        data={"url": url, "content_preview": content_preview},
+    )
 
 
 def synthesis_started(sources_count: int) -> SSEEvent:
@@ -55,11 +82,20 @@ def synthesis_progress(chunk: str) -> SSEEvent:
     return SSEEvent(event=EventType.SYNTHESIS_PROGRESS, data={"chunk": chunk})
 
 
-def research_complete(report: str, sources: list[dict], tokens_used: int = 0) -> SSEEvent:
-    return SSEEvent(
-        event=EventType.RESEARCH_COMPLETE,
-        data={"report": report, "sources": sources, "tokens_used": tokens_used},
-    )
+def research_complete(
+    report: str,
+    sources: list[dict],
+    tokens_used: int = 0,
+    runtime_ms: int | None = None,
+) -> SSEEvent:
+    data: dict[str, Any] = {
+        "report": report,
+        "sources": sources,
+        "tokens_used": tokens_used,
+    }
+    if runtime_ms is not None:
+        data["runtime_ms"] = runtime_ms
+    return SSEEvent(event=EventType.RESEARCH_COMPLETE, data=data)
 
 
 def error(message: str, agent: str | None = None) -> SSEEvent:

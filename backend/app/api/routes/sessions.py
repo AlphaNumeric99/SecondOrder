@@ -79,6 +79,9 @@ def _build_research_snapshot(messages: list[dict], research_steps: list[dict]) -
     notes: list[str] = []
     ui_steps: list[dict] = []
     sources: list[dict] = []
+    execution_graph_summary: dict = {}
+    memory_summary: dict = {}
+    verification_summary: dict = {}
     source_urls: set[str] = set()
     error_message: str | None = None
 
@@ -101,6 +104,18 @@ def _build_research_snapshot(messages: list[dict], research_steps: list[dict]) -
                 plan = [s for s in raw_steps if isinstance(s, str)]
             continue
 
+        if step_type == "execution_graph":
+            execution_graph_summary = data
+            continue
+
+        if step_type == "memory":
+            memory_summary = data
+            continue
+
+        if step_type == "verification":
+            verification_summary = data
+            continue
+
         if step_type == "search":
             has_search = True
             if status in ("pending", "running"):
@@ -117,7 +132,11 @@ def _build_research_snapshot(messages: list[dict], research_steps: list[dict]) -
                 {
                     "id": str(row.get("id")),
                     "agent": "search",
-                    "status": "error" if status == "error" else "completed" if status == "completed" else "running",
+                    "status": (
+                        "error"
+                        if status == "error"
+                        else "completed" if status == "completed" else "running"
+                    ),
                     "label": label,
                     "detail": detail,
                     "results": results,
@@ -140,7 +159,11 @@ def _build_research_snapshot(messages: list[dict], research_steps: list[dict]) -
             if status in ("pending", "running"):
                 has_running_scrape = True
             label = data.get("url") if isinstance(data.get("url"), str) else "scraper agent"
-            preview = data.get("content_preview") if isinstance(data.get("content_preview"), str) else ""
+            preview = (
+                data.get("content_preview")
+                if isinstance(data.get("content_preview"), str)
+                else ""
+            )
             if preview:
                 detail = f"Scraped: {preview[:140]}..."
             elif isinstance(data.get("status"), str):
@@ -151,7 +174,11 @@ def _build_research_snapshot(messages: list[dict], research_steps: list[dict]) -
                 {
                     "id": str(row.get("id")),
                     "agent": "scraper",
-                    "status": "error" if status == "error" else "completed" if status == "completed" else "running",
+                    "status": (
+                        "error"
+                        if status == "error"
+                        else "completed" if status == "completed" else "running"
+                    ),
                     "label": label,
                     "detail": detail,
                 }
@@ -176,7 +203,11 @@ def _build_research_snapshot(messages: list[dict], research_steps: list[dict]) -
                         continue
                     source_urls.add(url)
                     title = src.get("title") if isinstance(src.get("title"), str) else ""
-                    domain = src.get("domain") if isinstance(src.get("domain"), str) else (urlparse(url).netloc or url)
+                    domain = (
+                        src.get("domain")
+                        if isinstance(src.get("domain"), str)
+                        else (urlparse(url).netloc or url)
+                    )
                     sources.append({"title": title or domain, "url": url, "domain": domain})
 
     report = ""
@@ -206,6 +237,9 @@ def _build_research_snapshot(messages: list[dict], research_steps: list[dict]) -
         "sources": sources,
         "report": report,
         "error": error_message,
+        "execution_graph_summary": execution_graph_summary,
+        "memory_summary": memory_summary,
+        "verification_summary": verification_summary,
     }
 
 

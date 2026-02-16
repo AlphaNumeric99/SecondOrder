@@ -83,3 +83,33 @@ def test_build_research_snapshot_includes_persisted_notes():
         "Identified candidate artist as Owen Richard Evans.",
         "Two viral TikTok songs were repeatedly cited.",
     ]
+
+
+def test_build_research_snapshot_includes_hybrid_summaries():
+    snapshot = _build_research_snapshot(
+        messages=[],
+        research_steps=[
+            {
+                "id": "exec-1",
+                "step_type": "execution_graph",
+                "status": "completed",
+                "data": {"node_count": 9, "dependency_depth": 3},
+            },
+            {
+                "id": "mem-1",
+                "step_type": "memory",
+                "status": "completed",
+                "data": {"inserted_chunks": 12},
+            },
+            {
+                "id": "ver-1",
+                "step_type": "verification",
+                "status": "completed",
+                "data": {"supported": 2, "total": 3},
+            },
+        ],
+    )
+
+    assert snapshot["execution_graph_summary"]["node_count"] == 9
+    assert snapshot["memory_summary"]["inserted_chunks"] == 12
+    assert snapshot["verification_summary"]["supported"] == 2

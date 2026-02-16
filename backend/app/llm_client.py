@@ -204,6 +204,7 @@ class OpenRouterMessagesAdapter:
             "model": model,
             "messages": self._to_openai_messages(system, messages),
             "max_tokens": max_tokens,
+            "temperature": 0,
         }
         if tools:
             kwargs["tools"] = self._to_openai_tools(tools)
@@ -224,6 +225,7 @@ class OpenRouterMessagesAdapter:
             model=model,
             messages=self._to_openai_messages(system, messages),
             max_tokens=max_tokens,
+            temperature=0,
             stream=True,
             stream_options={"include_usage": True},
         )
