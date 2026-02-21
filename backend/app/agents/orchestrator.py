@@ -78,6 +78,9 @@ class ResearchOrchestrator:
 
     def __init__(self, model: str | None = None, session_id: str | None = None):
         self.model = model or get_model()
+        planner_setting = getattr(settings, "planner_model", "")
+        planner_override = planner_setting.strip() if isinstance(planner_setting, str) else ""
+        self.planner_model = planner_override or self.model
         self.session_id = session_id
         self.client = None
         self.search_executor_mode = str(settings.search_executor_mode).lower().strip()
@@ -119,17 +122,24 @@ class ResearchOrchestrator:
         self._extract_service: ExtractService | None = None
         self._evidence_repository: EvidenceRepository | None = None
 
-    async def _log_call(self, caller: str, response: Any, elapsed_ms: int) -> None:
+    async def _log_call(
+        self,
+        caller: str,
+        response: Any,
+        elapsed_ms: int,
+        model_name: str | None = None,
+    ) -> None:
         """Log an LLM call to the database and file logs."""
         from app.services import logger as log_service
 
         try:
+            used_model = model_name or self.model
             usage = response.usage if hasattr(response, "usage") else None
             input_tokens = getattr(usage, "input_tokens", 0) if usage else 0
             output_tokens = getattr(usage, "output_tokens", 0) if usage else 0
 
             await db.log_llm_call(
-                model=self.model,
+                model=used_model,
                 caller=caller,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
@@ -138,7 +148,7 @@ class ResearchOrchestrator:
             )
             # Also log to file for debugging
             log_service.log_llm_call(
-                model=self.model,
+                model=used_model,
                 caller=caller,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
@@ -149,7 +159,7 @@ class ResearchOrchestrator:
                 event_type="logging_error",
                 message=f"Failed to log LLM call in {caller}",
                 error=str(e),
-                model=self.model,
+                model=model_name or self.model,
             )
 
     async def _generate_plan(self, query: str) -> list[str]:
@@ -296,7 +306,7 @@ class ResearchOrchestrator:
         active_client = self.client or llm_client()
         t0 = time.monotonic()
         response = await active_client.messages.create(
-            model=self.model,
+            model=self.planner_model,
             max_tokens=2048,
             system=render_prompt(
                 "orchestrator.plan_system",
@@ -305,7 +315,12 @@ class ResearchOrchestrator:
             ),
             messages=[{"role": "user", "content": query}],
         )
-        await self._log_call("orchestrator.plan", response, int((time.monotonic() - t0) * 1000))
+        await self._log_call(
+            "orchestrator.plan",
+            response,
+            int((time.monotonic() - t0) * 1000),
+            model_name=self.planner_model,
+        )
 
         blocks = getattr(response, "content", None) or []
         text_parts: list[str] = []

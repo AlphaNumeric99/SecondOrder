@@ -60,6 +60,25 @@ class TestOrchestratorPlan:
             assert len(plan) >= 1
 
     @pytest.mark.asyncio
+    async def test_generate_plan_uses_planner_model_override(self):
+        from app.agents import orchestrator as orch_module
+
+        with patch.object(orch_module.settings, "planner_model", "openai/gpt-5"):
+            orchestrator = orch_module.ResearchOrchestrator()
+
+            mock_response = MagicMock()
+            mock_content = MagicMock()
+            mock_content.text = '["query 1"]'
+            mock_response.content = [mock_content]
+
+            orchestrator.client = AsyncMock()
+            orchestrator.client.messages.create = AsyncMock(return_value=mock_response)
+
+            plan = await orchestrator._generate_plan("test query")
+            assert "query 1" in plan
+            assert orchestrator.client.messages.create.await_args.kwargs["model"] == "openai/gpt-5"
+
+    @pytest.mark.asyncio
     async def test_generate_plan_augments_short_chain_query(self):
         with patch("app.config.settings") as mock_settings:
             mock_settings.openrouter_api_key = "test"
