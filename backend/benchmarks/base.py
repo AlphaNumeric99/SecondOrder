@@ -99,24 +99,27 @@ class Benchmark(ABC):
 
     async def run(
         self,
-        model: str = "openai/gpt-4o-mini",
+        model: str | None = None,
         limit: int | None = None,
         output_dir: str = "benchmarks/results",
     ) -> BenchmarkReport:
         """Run the full benchmark: load tasks, generate responses, evaluate."""
         from app.agents.orchestrator import ResearchOrchestrator
+        from app.llm_client import get_model
+
+        resolved_model = model or get_model()
 
         tasks = await self.load_tasks(limit=limit)
         results: list[EvalResult] = []
 
-        print(f"\nRunning {self.name} benchmark ({len(tasks)} tasks, model={model})")
+        print(f"\nRunning {self.name} benchmark ({len(tasks)} tasks, model={resolved_model})")
 
         for i, task in enumerate(tasks):
             print(f"  [{i+1}/{len(tasks)}] {task.domain}: {task.query[:80]}...")
 
             # Run research
             start = time.time()
-            orchestrator = ResearchOrchestrator(model=model)
+            orchestrator = ResearchOrchestrator(model=resolved_model)
             report_text = ""
 
             try:
@@ -152,7 +155,7 @@ class Benchmark(ABC):
 
         report = BenchmarkReport(
             benchmark_name=self.name,
-            model=model,
+            model=resolved_model,
             timestamp=datetime.now().strftime("%Y%m%d_%H%M%S"),
             total_tasks=len(tasks),
             completed_tasks=len(results),

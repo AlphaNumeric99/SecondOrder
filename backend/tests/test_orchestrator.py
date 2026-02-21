@@ -14,6 +14,8 @@ class TestOrchestratorPlan:
             mock_settings.openrouter_api_key = "test"
             mock_settings.openrouter_model = ""
             mock_settings.default_model = "openai/gpt-4o-mini"
+            mock_settings.app_log_level = "INFO"
+            mock_settings.noisy_log_level = "WARNING"
 
             from app.agents.orchestrator import ResearchOrchestrator
 
@@ -37,6 +39,8 @@ class TestOrchestratorPlan:
             mock_settings.openrouter_api_key = "test"
             mock_settings.openrouter_model = ""
             mock_settings.default_model = "openai/gpt-4o-mini"
+            mock_settings.app_log_level = "INFO"
+            mock_settings.noisy_log_level = "WARNING"
 
             from app.agents.orchestrator import ResearchOrchestrator
 
@@ -61,6 +65,8 @@ class TestOrchestratorPlan:
             mock_settings.openrouter_api_key = "test"
             mock_settings.openrouter_model = ""
             mock_settings.default_model = "openai/gpt-4o-mini"
+            mock_settings.app_log_level = "INFO"
+            mock_settings.noisy_log_level = "WARNING"
 
             from app.agents.orchestrator import ResearchOrchestrator
 
@@ -91,6 +97,8 @@ class TestURLSelection:
             mock_settings.openrouter_api_key = "test"
             mock_settings.openrouter_model = ""
             mock_settings.default_model = "openai/gpt-4o-mini"
+            mock_settings.app_log_level = "INFO"
+            mock_settings.noisy_log_level = "WARNING"
 
             from app.agents.orchestrator import ResearchOrchestrator
 
@@ -113,6 +121,8 @@ class TestURLSelection:
             mock_settings.openrouter_api_key = "test"
             mock_settings.openrouter_model = ""
             mock_settings.default_model = "openai/gpt-4o-mini"
+            mock_settings.app_log_level = "INFO"
+            mock_settings.noisy_log_level = "WARNING"
 
             from app.agents.orchestrator import ResearchOrchestrator
 
@@ -133,6 +143,8 @@ class TestURLSelection:
             mock_settings.openrouter_api_key = "test"
             mock_settings.openrouter_model = ""
             mock_settings.default_model = "openai/gpt-4o-mini"
+            mock_settings.app_log_level = "INFO"
+            mock_settings.noisy_log_level = "WARNING"
 
             from app.agents.orchestrator import ResearchOrchestrator
 
@@ -143,3 +155,115 @@ class TestURLSelection:
                 ["Alex Jordan Smith"],
             )
             assert "Alex Jordan Smith (Alex Smith)" in upgraded
+
+    def test_extract_title_case_phrases_keeps_single_word_musician_entity(self):
+        with patch("app.config.settings") as mock_settings:
+            mock_settings.openrouter_api_key = "test"
+            mock_settings.openrouter_model = ""
+            mock_settings.default_model = "openai/gpt-4o-mini"
+            mock_settings.app_log_level = "INFO"
+            mock_settings.noisy_log_level = "WARNING"
+
+            from app.agents.orchestrator import ResearchOrchestrator
+
+            phrases = ResearchOrchestrator._extract_title_case_phrases(
+                "Roar (musician) - Wikipedia"
+            )
+            assert "Roar" in phrases
+
+    def test_build_chain_bootstrap_queries_filters_generic_labels(self):
+        with patch("app.config.settings") as mock_settings:
+            mock_settings.openrouter_api_key = "test"
+            mock_settings.openrouter_model = ""
+            mock_settings.default_model = "openai/gpt-4o-mini"
+            mock_settings.app_log_level = "INFO"
+            mock_settings.noisy_log_level = "WARNING"
+
+            from app.agents.orchestrator import ResearchOrchestrator
+
+            orchestrator = ResearchOrchestrator()
+            query = (
+                'Name two albums by the artist who played keyboard in a band that won '
+                '"Best New Artist" in 2018.'
+            )
+            search_results = [
+                {
+                    "title": "Ada Stone (musician) - Wikipedia",
+                    "content": "American musician and songwriter.",
+                    "url": "https://en.wikipedia.org/wiki/Ada_Stone_(musician)",
+                },
+                {
+                    "title": "Best New Artist | City Music Awards 2024",
+                    "content": "Local nightlife category winner",
+                    "url": "https://example.com/awards/best-new-artist-2024",
+                },
+            ]
+            queries = orchestrator._build_chain_bootstrap_queries(query, search_results)
+
+            assert any("Ada Stone" in q for q in queries)
+            assert not any("Best New Artist" in q for q in queries)
+
+    def test_extract_band_candidates_from_scraped_parses_heading_block(self):
+        with patch("app.config.settings") as mock_settings:
+            mock_settings.openrouter_api_key = "test"
+            mock_settings.openrouter_model = ""
+            mock_settings.default_model = "openai/gpt-4o-mini"
+            mock_settings.app_log_level = "INFO"
+            mock_settings.noisy_log_level = "WARNING"
+
+            from app.agents.orchestrator import ResearchOrchestrator
+
+            orchestrator = ResearchOrchestrator()
+            query = 'Find the group that won "Best New Artist" in 2018.'
+            scraped = {
+                "https://example.com/awards/2018": (
+                    ("N" * 9200)
+                    + "\n### BEST NEW ARTIST\n\n## The Midnight Rails\n"
+                    + "\nShare BEST NEW ARTIST\n"
+                )
+            }
+
+            candidates = orchestrator._extract_band_candidates_from_scraped(query, scraped)
+            assert "The Midnight Rails" in candidates
+
+    def test_build_chain_enrichment_queries_prioritizes_scraped_band_candidates(self):
+        with patch("app.config.settings") as mock_settings:
+            mock_settings.openrouter_api_key = "test"
+            mock_settings.openrouter_model = ""
+            mock_settings.default_model = "openai/gpt-4o-mini"
+            mock_settings.app_log_level = "INFO"
+            mock_settings.noisy_log_level = "WARNING"
+
+            from app.agents.orchestrator import ResearchOrchestrator
+
+            orchestrator = ResearchOrchestrator()
+            query = (
+                'Name two songs by the artist who played drums in a band that won '
+                '"Best New Artist" in 2018.'
+            )
+
+            with (
+                patch.object(
+                    orchestrator,
+                    "_extract_band_candidates_from_scraped",
+                    return_value=["Andrew Jackson Jihad"],
+                ),
+                patch.object(
+                    orchestrator,
+                    "_extract_band_candidates_from_results",
+                    return_value=["Noisy Candidate"],
+                ),
+                patch.object(
+                    orchestrator,
+                    "_extract_person_candidates_from_content",
+                    return_value=[],
+                ),
+            ):
+                queries = orchestrator._build_chain_enrichment_queries(query, [], {})
+
+            assert queries
+            assert any("Andrew Jackson Jihad" in q for q in queries)
+            assert not any("joined 2016 left 2021" in q for q in queries)
+            assert not any("Roar" in q for q in queries)
+
+

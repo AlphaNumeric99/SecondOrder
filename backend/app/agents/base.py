@@ -7,6 +7,7 @@ from app.llm_client import client as llm_client, get_model
 from app.models.events import SSEEvent
 from app.services import logger as log_service
 from app.services import supabase as db
+from app.services.prompt_store import render_prompt
 
 
 class BaseAgent:
@@ -17,7 +18,7 @@ class BaseAgent:
     """
 
     name: str = "base"
-    system_prompt: str = "You are a helpful research assistant."
+    system_prompt: str = render_prompt("base.system_prompt")
     tools: list[dict[str, Any]] = []
 
     def __init__(self, model: str | None = None, session_id: str | None = None):
@@ -49,7 +50,12 @@ class BaseAgent:
 
         if context:
             messages.append({"role": "user", "content": f"<context>\n{context}\n</context>"})
-            messages.append({"role": "assistant", "content": "I've noted the context. How can I help?"})
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": render_prompt("base.context_ack_prompt"),
+                }
+            )
 
         messages.append({"role": "user", "content": user_message})
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.config import settings
+from app.services.env_safety import sanitize_ssl_keylogfile
 from app.tools import brave_search, tavily_search
 from app.tools.tavily_search import SearchResult
 
@@ -22,6 +23,7 @@ async def search(
     max_results: int = 10,
     time_range: str | None = None,
 ) -> SearchResponse:
+    sanitize_ssl_keylogfile()
     provider = settings.search_provider.lower().strip()
     use_fallback = settings.search_fallback_to_tavily
 

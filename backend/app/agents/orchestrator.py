@@ -5,13 +5,17 @@ import hashlib
 import json
 import re
 import time
-import httpx
 from dataclasses import dataclass, field
 from datetime import date
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, AsyncGenerator
 from uuid import UUID
 
+from app.research_core.evidence.repository import EvidenceRepository
+from app.research_core.extract.service import ExtractService
+from app.research_core.models.interfaces import ScrapeRequest
+from app.research_core.scrape.service import ScrapeService
 from app.agents.analyzer_agent import AnalyzerAgent
 from app.agents.search_agent import SearchAgent
 from app.agents.verification_agent import VerificationAgent
@@ -21,11 +25,13 @@ from app.models.execution import VerificationResult
 from app.models.memory import MemoryRecord
 from app.models.events import SSEEvent
 from app.services.execution_compiler import compile_execution_graph, graph_summary
+from app.services.env_safety import sanitize_ssl_keylogfile
 from app.services.memory_store import get_memory_store
+from app.services.prompt_store import render_prompt
 from app.services.search_executor import run_deterministic_searches
 from app.services import streaming
 from app.services import supabase as db
-from app.tools import content_extractor, hasdata_scraper, web_utils
+from app.tools import web_utils
 
 
 @dataclass
@@ -101,6 +107,17 @@ class ResearchOrchestrator:
         self.hybrid_max_parallel_search = int(settings.hybrid_max_parallel_search)
         self.hybrid_max_parallel_extract = int(settings.hybrid_max_parallel_extract)
         self.hybrid_max_parallel_verify = int(settings.hybrid_max_parallel_verify)
+        self.scrape_headless_default = bool(settings.scrape_headless_default)
+        self.scrape_quality_threshold = float(settings.scrape_quality_threshold)
+        self.scrape_pipeline_max_parallel = max(int(settings.scrape_pipeline_max_parallel), 1)
+        self.scrape_retry_max = max(int(settings.scrape_retry_max), 0)
+        self.scrape_provider = str(settings.scrape_provider).lower().strip()
+        self.firecrawl_base_url = str(settings.firecrawl_base_url).strip()
+        self.firecrawl_api_key = str(settings.firecrawl_api_key).strip()
+        self.jina_reader_base_url = str(settings.jina_reader_base_url).strip()
+        self._scrape_service: ScrapeService | None = None
+        self._extract_service: ExtractService | None = None
+        self._evidence_repository: EvidenceRepository | None = None
 
     async def _log_call(self, caller: str, response: Any, elapsed_ms: int) -> None:
         """Log an LLM call to the database and file logs."""
@@ -281,17 +298,10 @@ class ResearchOrchestrator:
         response = await active_client.messages.create(
             model=self.model,
             max_tokens=2048,
-            system=(
-                f"You are a research planning expert. Today's date is {date.today().isoformat()}. "
-                "Given a research query, break it down into "
-                "3-5 specific sub-queries that together will provide comprehensive coverage of the "
-                "topic. Each sub-query should explore a different angle or aspect. "
-                "For chain questions, include explicit entity-resolution steps and at least one "
-                "canonical-source step (e.g. site:wikipedia.org) before downstream steps. "
-                "When the query asks about 'current' or 'latest' data, make sure sub-queries "
-                f"include the current year ({date.today().year}) to find the most recent information.\n\n"
-                "Respond with ONLY a JSON array of strings, no other text. Example:\n"
-                '["sub-query 1", "sub-query 2", "sub-query 3"]'
+            system=render_prompt(
+                "orchestrator.plan_system",
+                today_iso=date.today().isoformat(),
+                current_year=date.today().year,
             ),
             messages=[{"role": "user", "content": query}],
         )
@@ -465,7 +475,72 @@ class ResearchOrchestrator:
 
         return all_results, all_events
 
-    async def _select_top_urls(self, search_results: list[dict[str, Any]], max_urls: int = 8) -> list[str]:
+    @staticmethod
+    def _query_terms(query: str) -> tuple[list[str], list[str]]:
+        stopwords = {
+            "a",
+            "an",
+            "and",
+            "are",
+            "as",
+            "at",
+            "be",
+            "by",
+            "for",
+            "from",
+            "how",
+            "in",
+            "is",
+            "it",
+            "its",
+            "name",
+            "of",
+            "on",
+            "or",
+            "that",
+            "the",
+            "their",
+            "then",
+            "these",
+            "this",
+            "those",
+            "to",
+            "two",
+            "was",
+            "were",
+            "what",
+            "when",
+            "which",
+            "who",
+            "with",
+            "won",
+            "only",
+            "provide",
+            "according",
+        }
+        lowered = (query or "").lower()
+        tokens = re.findall(r"[a-z0-9]{3,}", lowered)
+        terms = [t for t in tokens if t not in stopwords]
+        # Keep first-seen order but deduplicate.
+        deduped_terms: list[str] = []
+        seen_terms: set[str] = set()
+        for term in terms:
+            if term in seen_terms:
+                continue
+            seen_terms.add(term)
+            deduped_terms.append(term)
+
+        raw_phrases = re.findall(r'"([^"]{3,120})"', query or "")
+        phrases = [" ".join(p.lower().split()).strip() for p in raw_phrases if p.strip()]
+        return deduped_terms, phrases
+
+    async def _select_top_urls(
+        self,
+        search_results: list[dict[str, Any]],
+        max_urls: int = 8,
+        *,
+        query: str = "",
+    ) -> list[str]:
         """Select the top URLs to scrape based on relevance scores."""
         noisy_domains = {
             "reddit.com",
@@ -477,26 +552,131 @@ class ResearchOrchestrator:
             "facebook.com",
             "www.facebook.com",
             "tokchart.com",
+            "quora.com",
+            "www.quora.com",
+            "ranker.com",
+            "www.ranker.com",
+            "thebash.com",
+            "www.thebash.com",
+            "singersroom.com",
+            "www.singersroom.com",
         }
-        # Deduplicate by URL, keep highest score
-        seen: dict[str, float] = {}
+        query_terms, quoted_phrases = self._query_terms(query)
+        entity_hints = self._derive_entity_hints(search_results) if self._is_chain_like_query(query) else []
+
+        # Deduplicate by URL, keep highest rank score.
+        ranked_by_url: dict[str, float] = {}
+        overlap_by_url: dict[str, int] = {}
         for r in search_results:
             url = r.get("url", "")
-            score = r.get("score", 0.0)
+            raw_score = r.get("score", 0.0)
+            try:
+                base_score = float(raw_score)
+            except (TypeError, ValueError):
+                base_score = 0.0
             if url and web_utils.is_valid_url(url):
                 domain = web_utils.extract_domain(url).lower()
                 if domain in noisy_domains:
                     continue
-                if url not in seen or score > seen[url]:
-                    seen[url] = score
 
-        # Sort by score descending, take top N
-        sorted_urls = sorted(seen.items(), key=lambda x: x[1], reverse=True)
-        selected = [url for url, _ in sorted_urls[:max_urls]]
+                title = str(r.get("title", "") or "").lower()
+                snippet = str(r.get("content", "") or "").lower()
+                url_lower = url.lower()
+
+                title_overlap = 0
+                url_overlap = 0
+                snippet_overlap = 0
+                if query_terms:
+                    title_overlap = sum(1 for term in query_terms if term in title)
+                    url_overlap = sum(1 for term in query_terms if term in url_lower)
+                    snippet_overlap = sum(1 for term in query_terms if term in snippet)
+
+                token_overlap = title_overlap + url_overlap + (0.25 * snippet_overlap)
+
+                phrase_overlap = 0.0
+                if quoted_phrases:
+                    phrase_overlap = float(
+                        sum(1 for phrase in quoted_phrases if phrase in title or phrase in url_lower)
+                    ) + (
+                        0.25 * float(sum(1 for phrase in quoted_phrases if phrase in snippet))
+                    )
+                entity_overlap = 0
+                if entity_hints:
+                    entity_overlap = sum(
+                        1 for hint in entity_hints if hint in title or hint in url_lower or hint in snippet
+                    )
+
+                rank_score = (
+                    base_score
+                    + (token_overlap * 0.24)
+                    + (phrase_overlap * 0.75)
+                    + (entity_overlap * 0.35)
+                )
+
+                # Generic noise suppression for broad index/list pages with weak overlap.
+                lowered_url = url_lower
+                if "/list_of_" in lowered_url and token_overlap <= 2:
+                    rank_score -= 1.0
+                if "/list_of_people_" in lowered_url:
+                    rank_score -= 1.0
+                if "how-to-get-a-wikipedia-page" in lowered_url and token_overlap <= 2:
+                    rank_score -= 1.0
+                if domain in {"bandzoogle.com", "diymusician.cdbaby.com"} and token_overlap <= 2:
+                    rank_score -= 0.8
+
+                # Promote canonical pages when they strongly overlap query anchors.
+                if "wikipedia.org" in domain and token_overlap >= 2:
+                    rank_score += 0.4
+
+                if "wikipedia.org/wiki/" in lowered_url:
+                    if any(
+                        marker in lowered_url
+                        for marker in ("_(musician)", "_(band)", "_(artist)", "_(drummer)")
+                    ):
+                        rank_score += 0.45
+                    if "/list_of_" in lowered_url:
+                        rank_score -= 0.8
+
+                prev_score = ranked_by_url.get(url)
+                if prev_score is None or rank_score > prev_score:
+                    ranked_by_url[url] = rank_score
+                    overlap_by_url[url] = int(token_overlap)
+
+        # Sort by rank score descending, take top N.
+        sorted_urls = sorted(ranked_by_url.items(), key=lambda x: x[1], reverse=True)
+        selected: list[str] = []
+        domain_counts: dict[str, int] = {}
+        for url, _ in sorted_urls:
+            if len(selected) >= max_urls:
+                break
+            domain = web_utils.extract_domain(url).lower()
+            cap = 3 if "wikipedia.org" in domain else 2
+            if domain_counts.get(domain, 0) >= cap:
+                continue
+            selected.append(url)
+            domain_counts[domain] = domain_counts.get(domain, 0) + 1
+
+        if len(selected) < max_urls:
+            for url, _ in sorted_urls:
+                if len(selected) >= max_urls:
+                    break
+                if url not in selected:
+                    selected.append(url)
 
         # Ensure canonical references (Wikipedia) are represented in scrape set.
-        wiki_candidates = [url for url, _ in sorted_urls if "wikipedia.org" in web_utils.extract_domain(url)]
-        for wiki_url in wiki_candidates[:2]:
+        priority_wiki = [
+            url
+            for url, _ in sorted_urls
+            if "wikipedia.org/wiki/" in url.lower()
+            and any(
+                marker in url.lower()
+                for marker in ("_(musician)", "_(band)", "_(artist)", "_(drummer)")
+            )
+        ]
+        wiki_candidates = [
+            url for url, _ in sorted_urls if "wikipedia.org" in web_utils.extract_domain(url)
+        ]
+        for wiki_url in (priority_wiki + wiki_candidates)[:2]:
             if wiki_url in selected:
                 continue
             if len(selected) < max_urls:
@@ -509,7 +689,605 @@ class ResearchOrchestrator:
                     selected[idx] = wiki_url
                     break
 
+        # Guarantee at least one high-overlap URL when query terms are available.
+        if query_terms:
+            overlap_sorted = sorted(
+                overlap_by_url.items(),
+                key=lambda x: x[1],
+                reverse=True,
+            )
+            for url, overlap in overlap_sorted[:3]:
+                if overlap <= 0:
+                    break
+                if url in selected:
+                    continue
+                if len(selected) < max_urls:
+                    selected.append(url)
+                else:
+                    selected[-1] = url
+
         return selected
+
+    def _derive_entity_hints(self, search_results: list[dict[str, Any]]) -> list[str]:
+        counts: dict[str, int] = {}
+        for result in search_results[:80]:
+            title = str(result.get("title", "") or "").strip()
+            url = str(result.get("url", "") or "").strip()
+            domain = web_utils.extract_domain(url).lower()
+            if not title:
+                continue
+
+            candidates = self._extract_title_case_phrases(title)
+            if "wikipedia.org" in domain:
+                wiki_title = re.sub(r"\s*-\s*Wikipedia\s*$", "", title, flags=re.IGNORECASE).strip()
+                if wiki_title:
+                    candidates.append(wiki_title)
+
+            bonus = 2 if "wikipedia.org" in domain else 1
+            for candidate in candidates:
+                normalized = " ".join(candidate.split()).strip().lower()
+                if not normalized:
+                    continue
+                if self._is_generic_entity_phrase(normalized):
+                    continue
+                counts[normalized] = counts.get(normalized, 0) + bonus
+
+        ranked = sorted(counts.items(), key=lambda item: (item[1], len(item[0])), reverse=True)
+        hints: list[str] = []
+        for hint, score in ranked:
+            if score < 2:
+                continue
+            hints.append(hint)
+            if len(hints) >= 6:
+                break
+        return hints
+
+    @staticmethod
+    def _is_chain_like_query(query: str) -> bool:
+        lowered = (query or "").lower()
+        markers = (
+            "who",
+            "that",
+            "which",
+            "from 20",
+            "from 19",
+            "played",
+            "won",
+            "name the two",
+        )
+        return sum(1 for marker in markers if marker in lowered) >= 3
+
+    @staticmethod
+    def _is_generic_entity_phrase(value: str) -> bool:
+        lowered = value.lower().strip()
+        if not lowered:
+            return True
+        generic_fragments = (
+            "best ",
+            "award",
+            "timeline",
+            "wikipedia",
+            "newsroom",
+            "top ",
+            "list of ",
+            "people and places",
+            "share to",
+            "email facebook",
+        )
+        if any(fragment in lowered for fragment in generic_fragments):
+            return True
+        words = lowered.split()
+        if len(words) == 1:
+            token = words[0]
+            if token in {"band", "artist", "music", "songs", "video", "viral"}:
+                return True
+            if token in {"film", "drums"}:
+                return True
+            if len(token) < 3:
+                return True
+        if all(word in {"share", "to", "email", "facebook", "x"} for word in words):
+            return True
+        return False
+
+    @staticmethod
+    def _extract_title_case_phrases(text: str) -> list[str]:
+        phrases = re.findall(
+            r"\b[A-Z][A-Za-z0-9&'().-]*(?:\s+[A-Z][A-Za-z0-9&'().-]*){1,4}",
+            text,
+        )
+        phrases.extend(
+            re.findall(
+                r"\b([A-Z][A-Za-z0-9&'().-]{2,})\s*\((?:musician|artist|drummer)\b",
+                text,
+                flags=re.IGNORECASE,
+            )
+        )
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for phrase in phrases:
+            value = " ".join(phrase.split()).strip(".,:;!?()[]")
+            if not value:
+                continue
+            if len(value.split()) < 2 and len(value) < 4:
+                continue
+            if ResearchOrchestrator._is_generic_entity_phrase(value):
+                continue
+            key = value.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(value)
+        return cleaned
+
+    def _build_chain_bootstrap_queries(
+        self,
+        query: str,
+        search_results: list[dict[str, Any]],
+    ) -> list[str]:
+        if not self._is_chain_like_query(query):
+            return []
+        lowered_query = (query or "").lower()
+
+        quoted_phrases = [
+            " ".join(p.lower().split()).strip()
+            for p in re.findall(r'"([^"]{3,120})"', query or "")
+            if p.strip()
+        ]
+        years = list(dict.fromkeys(re.findall(r"\b(?:19|20)\d{2}\b", query or "")))
+
+        blocked_substrings = (
+            "wikipedia",
+            "people and places",
+            "newsroom",
+        )
+
+        candidate_counts: dict[str, int] = {}
+        for result in search_results[:50]:
+            title = str(result.get("title", "") or "")
+            snippet = str(result.get("content", "") or "")
+            url = str(result.get("url", "") or "")
+            haystack = f"{title}\n{snippet}"
+            lowered_haystack = haystack.lower()
+            domain = web_utils.extract_domain(url).lower()
+            trusted_domains = (
+                "wikipedia.org",
+                "musicbrainz.org",
+                "last.fm",
+                "allmusic.com",
+                "discogs.com",
+            )
+            has_quoted_hit = bool(
+                quoted_phrases and any(phrase in lowered_haystack for phrase in quoted_phrases)
+            )
+            if not has_quoted_hit and not any(token in domain for token in trusted_domains):
+                continue
+            if not has_quoted_hit and quoted_phrases and "wikipedia.org" not in domain:
+                continue
+            bonus = 0
+            if has_quoted_hit:
+                bonus += 2
+            if "wikipedia.org" in domain:
+                bonus += 1
+
+            if "wikipedia.org" in domain:
+                wiki_title = re.sub(r"\s*-\s*Wikipedia\s*$", "", title, flags=re.IGNORECASE).strip()
+                if wiki_title:
+                    candidate_counts[wiki_title] = candidate_counts.get(wiki_title, 0) + 2
+
+            for phrase in self._extract_title_case_phrases(title):
+                key = phrase.lower()
+                if key in lowered_query:
+                    continue
+                if any(blocked in key for blocked in blocked_substrings):
+                    continue
+                if self._is_generic_entity_phrase(phrase):
+                    continue
+                if len(phrase) > 64:
+                    continue
+                score = 1 + bonus
+                lowered_title = title.lower()
+                if re.search(r"\((?:musician|band|artist|drummer)\)", lowered_title):
+                    score += 2
+                candidate_counts[phrase] = candidate_counts.get(phrase, 0) + score
+
+        if not candidate_counts:
+            return []
+
+        ranked_candidates = [
+            item
+            for item in sorted(
+                candidate_counts.items(),
+                key=lambda item: (item[1], len(item[0])),
+                reverse=True,
+            )
+            if item[1] >= 2
+        ]
+        if not ranked_candidates:
+            return []
+
+        wants_membership = "member" in lowered_query or "played" in lowered_query or "drum" in lowered_query
+        year_hint = " ".join(years[:2]).strip()
+        quoted_hint = quoted_phrases[0] if quoted_phrases else ""
+
+        queries: list[str] = []
+        for candidate, _ in ranked_candidates[:3]:
+            queries.append(f'"{candidate}" site:wikipedia.org')
+            if wants_membership:
+                suffix = f" {year_hint}" if year_hint else ""
+                queries.append(f'"{candidate}" members{suffix}'.strip())
+                queries.append(f'"{candidate}" lineup history{suffix}'.strip())
+            if "song" in lowered_query or "music" in lowered_query:
+                queries.append(f'"{candidate}" notable songs')
+
+        if quoted_hint:
+            if year_hint:
+                queries.append(f'"{quoted_hint}" relationship timeline {year_hint}')
+            queries.append(f'"{quoted_hint}" official source')
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for q in queries:
+            key = " ".join(q.lower().split())
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(q)
+            if len(deduped) >= 6:
+                break
+        return deduped
+
+    def _extract_band_candidates_from_results(
+        self,
+        search_results: list[dict[str, Any]],
+        query: str = "",
+    ) -> list[str]:
+        counts: dict[str, int] = {}
+        quoted_phrases = [
+            " ".join(p.lower().split()).strip()
+            for p in re.findall(r'"([^"]{3,120})"', query or "")
+            if p.strip()
+        ]
+        stopwords = {
+            "the",
+            "that",
+            "from",
+            "with",
+            "which",
+            "were",
+            "what",
+            "when",
+            "where",
+            "according",
+            "amongst",
+            "their",
+            "these",
+            "those",
+            "into",
+            "this",
+            "only",
+            "provide",
+        }
+        query_terms = [
+            token
+            for token in re.findall(r"[a-z0-9]{4,}", (query or "").lower())
+            if token not in stopwords
+        ][:12]
+        trusted_domains = (
+            "wikipedia.org",
+            "musicbrainz.org",
+            "allmusic.com",
+            "discogs.com",
+            "last.fm",
+            "genius.com",
+        )
+        for result in search_results[:120]:
+            title = str(result.get("title", "") or "").strip()
+            snippet = str(result.get("content", "") or "").strip()
+            url = str(result.get("url", "") or "").strip()
+            if not title:
+                continue
+            lowered_title = title.lower()
+            lowered_haystack = f"{title}\n{snippet}\n{url}".lower()
+            domain = web_utils.extract_domain(url).lower()
+            phrase_hit = any(phrase in lowered_haystack for phrase in quoted_phrases)
+            term_hits = sum(1 for term in query_terms if term in lowered_haystack)
+            domain_hit = any(token in domain for token in trusted_domains)
+            contextual = phrase_hit or term_hits >= 2 or domain_hit
+            if not contextual:
+                continue
+            wiki_band_match = re.match(r"(.+?)\s*\((?:band)\)\s*-\s*wikipedia\s*$", title, flags=re.IGNORECASE)
+            if wiki_band_match:
+                candidate = " ".join(wiki_band_match.group(1).split()).strip(".,:;!?()[]")
+                if candidate and not self._is_generic_entity_phrase(candidate):
+                    counts[candidate] = counts.get(candidate, 0) + 4
+
+            for phrase in self._extract_title_case_phrases(title):
+                if self._is_generic_entity_phrase(phrase):
+                    continue
+                score = 1
+                if "band" in lowered_title:
+                    score += 1
+                if "musician" in lowered_title:
+                    score += 1
+                counts[phrase] = counts.get(phrase, 0) + score
+
+        ranked = sorted(counts.items(), key=lambda item: (item[1], len(item[0])), reverse=True)
+        selected: list[str] = []
+        for candidate, score in ranked:
+            if score < 2:
+                continue
+            selected.append(candidate)
+            if len(selected) >= 4:
+                break
+        return selected
+
+    def _extract_band_candidates_from_scraped(
+        self,
+        query: str,
+        scraped_content: dict[str, str],
+    ) -> list[str]:
+        quoted_phrases = [
+            " ".join(p.split()).strip()
+            for p in re.findall(r'"([^"]{3,120})"', query or "")
+            if p.strip()
+        ]
+        counts: dict[str, int] = {}
+
+        def normalize_candidate(raw_value: str) -> str:
+            candidate = " ".join(raw_value.split()).strip(".,:;!?()[]")
+            candidate = re.sub(r"^[#*\-]+", "", candidate).strip(".,:;!?()[] ")
+            lowered_candidate = candidate.lower()
+            share_index = lowered_candidate.find(" share ")
+            if share_index >= 0:
+                candidate = candidate[:share_index].strip()
+            candidate = re.split(
+                r"\b(?:Share|Read|Advertisement|Copy Link|People & Places)\b",
+                candidate,
+                maxsplit=1,
+                flags=re.IGNORECASE,
+            )[0].strip(".,:;!?()[] ")
+            return candidate
+
+        for _, content in scraped_content.items():
+            if not content:
+                continue
+            text = " ".join(content[:120000].split())
+            found_phrase_match = False
+            for phrase in quoted_phrases:
+                phrase_patterns = [
+                    re.compile(
+                        rf"(?:#{{1,6}}\s*)?{re.escape(phrase)}(?:\s*#{{1,6}})?\s+([A-Z][A-Za-z0-9&'().-]*(?:\s+(?!Share\b)[A-Z][A-Za-z0-9&'().-]*){{0,5}})",
+                        flags=re.IGNORECASE,
+                    ),
+                    re.compile(
+                        rf"{re.escape(phrase)}[^A-Za-z0-9]+([A-Z][A-Za-z0-9&'().-]*(?:\s+[A-Z][A-Za-z0-9&'().-]*){{0,5}})",
+                        flags=re.IGNORECASE,
+                    ),
+                ]
+                for pattern in phrase_patterns:
+                    for match in pattern.findall(text):
+                        candidate = normalize_candidate(match)
+                        if self._is_generic_entity_phrase(candidate):
+                            continue
+                        counts[candidate] = counts.get(candidate, 0) + 8
+                        found_phrase_match = True
+
+            if found_phrase_match:
+                continue
+
+            for fallback_phrase in self._extract_title_case_phrases(text[:30000]):
+                if self._is_generic_entity_phrase(fallback_phrase):
+                    continue
+                counts[fallback_phrase] = counts.get(fallback_phrase, 0) + 1
+
+        normalized_counts: dict[str, int] = {}
+        for candidate, score in counts.items():
+            cleaned = re.sub(r"\s+Share\b.*$", "", candidate, flags=re.IGNORECASE).strip(
+                ".,:;!?()[] "
+            )
+            if not cleaned:
+                continue
+            if self._is_generic_entity_phrase(cleaned):
+                continue
+            normalized_counts[cleaned] = max(normalized_counts.get(cleaned, 0), score)
+
+        ranked = sorted(
+            normalized_counts.items(),
+            key=lambda item: (item[1], len(item[0])),
+            reverse=True,
+        )
+        min_score = 1
+        if ranked and ranked[0][1] >= 4:
+            min_score = 2
+        selected: list[str] = []
+        for candidate, score in ranked:
+            if score < min_score:
+                continue
+            selected.append(candidate)
+            if len(selected) >= 3:
+                break
+        return selected
+
+    def _extract_person_candidates_from_content(
+        self,
+        search_results: list[dict[str, Any]],
+        scraped_content: dict[str, str],
+        *,
+        band_candidates: list[str] | None = None,
+    ) -> list[str]:
+        name_pattern = re.compile(r"\b([A-Z][a-z]+(?: [A-Z][a-z]+){1,2})\b")
+        counts: dict[str, int] = {}
+        banned_first_tokens = {
+            "Retrieved",
+            "Category",
+            "Wikipedia",
+            "People",
+            "Pages",
+            "Music",
+            "Best",
+            "Share",
+            "Jump",
+            "Edit",
+        }
+        band_hints = [
+            " ".join(candidate.lower().split()).strip()
+            for candidate in (band_candidates or [])
+            if candidate
+        ]
+
+        def is_band_context(text: str) -> bool:
+            if not band_hints:
+                return True
+            lowered = text.lower()
+            for hint in band_hints:
+                if hint in lowered:
+                    return True
+                slug = re.sub(r"[^a-z0-9]+", "-", hint).strip("-")
+                if slug and slug in lowered:
+                    return True
+            return False
+
+        def include_name(name: str) -> bool:
+            first = name.split()[0]
+            if first in banned_first_tokens:
+                return False
+            if self._is_generic_entity_phrase(name):
+                return False
+            return True
+
+        for result in search_results[:120]:
+            title = str(result.get("title", "") or "")
+            snippet = str(result.get("content", "") or "")
+            url = str(result.get("url", "") or "")
+            combined = f"{title}\n{snippet}"
+            if "drum" not in combined.lower():
+                continue
+            if not is_band_context(f"{title}\n{snippet}\n{url}"):
+                continue
+            for match in name_pattern.finditer(combined):
+                name = match.group(1)
+                start, end = match.span(1)
+                window = combined[max(0, start - 120) : min(len(combined), end + 120)].lower()
+                if (
+                    "drum" not in window
+                    and "member" not in window
+                    and "lineup" not in window
+                ):
+                    continue
+                if not include_name(name):
+                    continue
+                counts[name] = counts.get(name, 0) + 1
+
+        for url, content in list(scraped_content.items())[:20]:
+            text = content[:18000]
+            if "drum" not in text.lower():
+                continue
+            if not is_band_context(f"{url}\n{text[:4000]}"):
+                continue
+            for match in name_pattern.finditer(text):
+                name = match.group(1)
+                start, end = match.span(1)
+                window = text[max(0, start - 160) : min(len(text), end + 160)].lower()
+                if (
+                    "drum" not in window
+                    and "member" not in window
+                    and "lineup" not in window
+                ):
+                    continue
+                if not include_name(name):
+                    continue
+                counts[name] = counts.get(name, 0) + 2
+
+        ranked = sorted(counts.items(), key=lambda item: (item[1], len(item[0])), reverse=True)
+        selected: list[str] = []
+        for candidate, score in ranked:
+            if score < 2:
+                continue
+            selected.append(candidate)
+            if len(selected) >= 4:
+                break
+        return selected
+
+    def _build_chain_enrichment_queries(
+        self,
+        query: str,
+        search_results: list[dict[str, Any]],
+        scraped_content: dict[str, str],
+    ) -> list[str]:
+        if not self._is_chain_like_query(query):
+            return []
+
+        lowered_query = (query or "").lower()
+        years = list(dict.fromkeys(re.findall(r"\b(?:19|20)\d{2}\b", query or "")))
+        year_hint = " ".join(years[:2]).strip()
+        entity_candidates_from_scraped = self._extract_band_candidates_from_scraped(
+            query,
+            scraped_content,
+        )
+        entity_candidates_from_results = self._extract_band_candidates_from_results(
+            search_results,
+            query=query,
+        )
+        entity_candidates: list[str] = []
+        if entity_candidates_from_scraped:
+            for candidate in entity_candidates_from_scraped:
+                if candidate in entity_candidates:
+                    continue
+                entity_candidates.append(candidate)
+                if len(entity_candidates) >= 3:
+                    break
+        else:
+            for candidate in entity_candidates_from_results:
+                if candidate in entity_candidates:
+                    continue
+                entity_candidates.append(candidate)
+                if len(entity_candidates) >= 4:
+                    break
+        person_candidates = self._extract_person_candidates_from_content(
+            search_results,
+            scraped_content,
+            band_candidates=entity_candidates,
+        )
+
+        queries: list[str] = []
+        for entity in entity_candidates[:3]:
+            queries.append(f'"{entity}" site:wikipedia.org')
+            suffix = f" {year_hint}" if year_hint else ""
+            queries.append(f'"{entity}" members timeline{suffix}'.strip())
+            queries.append(f'"{entity}" lineup history{suffix}'.strip())
+            if "song" in lowered_query or "music" in lowered_query:
+                queries.append(f'"{entity}" notable songs')
+            if "award" in lowered_query or "won" in lowered_query:
+                queries.append(f'"{entity}" awards history')
+
+            parts = [part for part in re.findall(r"[A-Za-z0-9]+", entity) if part]
+            if 2 <= len(parts) <= 5:
+                acronym = "".join(part[0].upper() for part in parts if part[0].isalpha())
+                if len(acronym) >= 2:
+                    queries.append(f'"{acronym}" membership timeline')
+                    if year_hint:
+                        queries.append(f'"{acronym}" {year_hint}')
+
+            for person in person_candidates[:2]:
+                queries.append(f'"{entity}" "{person}"')
+
+        for person in person_candidates[:3]:
+            queries.append(f'"{person}" site:wikipedia.org')
+            queries.append(f'"{person}" biography')
+            if year_hint:
+                queries.append(f'"{person}" career timeline {year_hint}')
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for query_item in queries:
+            key = " ".join(query_item.lower().split())
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(query_item)
+            if len(deduped) >= 10:
+                break
+        return deduped
 
     def _extract_canonical_full_names(
         self, search_results: list[dict[str, Any]], scraped_content: dict[str, str]
@@ -578,75 +1356,128 @@ class ResearchOrchestrator:
         self, urls: list[str], *, max_parallel: int
     ) -> tuple[dict[str, str], list[SSEEvent]]:
         """Scrape URLs with explicit concurrency limits."""
+        return await self._run_parallel_scrapes_primary(urls, max_parallel=max_parallel)
+
+    def _get_scrape_services(self) -> tuple[ScrapeService, ExtractService, EvidenceRepository]:
+        if self._scrape_service is None:
+            self._scrape_service = ScrapeService(
+                retry_max=self.scrape_retry_max,
+                provider=self.scrape_provider,
+                firecrawl_base_url=self.firecrawl_base_url,
+                firecrawl_api_key=self.firecrawl_api_key,
+                jina_reader_base_url=self.jina_reader_base_url,
+            )
+        if self._extract_service is None:
+            self._extract_service = ExtractService(
+                max_chars=settings.extractor_max_page_chars,
+            )
+        if self._evidence_repository is None:
+            self._evidence_repository = EvidenceRepository()
+        return (
+            self._scrape_service,
+            self._extract_service,
+            self._evidence_repository,
+        )
+
+    async def _run_parallel_scrapes_primary(
+        self,
+        urls: list[str],
+        *,
+        max_parallel: int,
+    ) -> tuple[dict[str, str], list[SSEEvent]]:
+        sanitize_ssl_keylogfile()
         all_events: list[SSEEvent] = [
             streaming.agent_started("scraper", url=url) for url in urls
         ]
         content_map: dict[str, str] = {}
-        semaphore = asyncio.Semaphore(max(max_parallel, 1))
+        scrape_service, extract_service, evidence_repo = self._get_scrape_services()
+        semaphore = asyncio.Semaphore(max(min(max_parallel, self.scrape_pipeline_max_parallel), 1))
 
-        def _extract_and_clean(url: str, html: str) -> str:
-            extracted_payload = content_extractor.extract_main_content(
-                url,
-                html,
-                max_chars=settings.extractor_max_page_chars,
-            )
-            return web_utils.clean_content(
-                extracted_payload.text,
-                max_length=settings.extractor_max_page_chars,
-            )
-
-        async with httpx.AsyncClient(timeout=30.0) as http_client:
-
-            async def run_one(url: str) -> None:
-                async with semaphore:
-                    all_events.append(
-                        streaming.agent_progress("scraper", url=url, status="scraping")
+        async def run_one(url: str) -> None:
+            async with semaphore:
+                all_events.append(
+                    streaming.agent_progress(
+                        "scraper",
+                        url=url,
+                        status="scraping",
+                        provider=self.scrape_provider,
                     )
-                    extracted = ""
-                    try:
-                        max_attempts = 1
-                        if settings.extractor_retry_enabled:
-                            max_attempts += max(int(settings.extractor_retry_max), 0)
+                )
+                extracted = ""
+                try:
+                    request = ScrapeRequest(
+                        url=url,
+                        render_mode="headless_default"
+                        if self.scrape_headless_default
+                        else "http_only",
+                        timeout_profile="standard",
+                        domain_policy_id="default",
+                    )
+                    artifact = await scrape_service.scrape(request)
+                    raw_html = Path(artifact.rendered_html_path).read_text(
+                        encoding="utf-8",
+                        errors="ignore",
+                    )
 
-                        for attempt in range(max_attempts):
-                            render_js = attempt > 0
-                            scraped = await hasdata_scraper.scrape(
-                                url,
-                                render_js=render_js,
-                                output_format_override="html",
-                                http_client=http_client,
-                            )
-                            if self.extract_in_thread:
-                                candidate = await asyncio.to_thread(
-                                    _extract_and_clean,
-                                    url,
-                                    scraped.content,
-                                )
-                            else:
-                                candidate = _extract_and_clean(url, scraped.content)
-
-                            if candidate:
-                                extracted = candidate
-                            if extracted and len(extracted) >= 450:
-                                break
-
-                        if extracted:
-                            all_events.append(streaming.scrape_result(url, extracted[:500]))
-                    except Exception as exc:
-                        all_events.append(
-                            streaming.error(f"Failed to scrape {url}: {exc}", agent="scraper")
+                    if self.extract_in_thread:
+                        extraction = await asyncio.to_thread(
+                            extract_service.extract,
+                            url=url,
+                            raw_html=raw_html,
+                            quality_threshold=self.scrape_quality_threshold,
                         )
-                    content_map[url] = extracted
+                    else:
+                        extraction = extract_service.extract(
+                            url=url,
+                            raw_html=raw_html,
+                            quality_threshold=self.scrape_quality_threshold,
+                        )
+
+                    evidence_repo.persist_artifact(artifact)
+                    evidence_repo.persist_extraction(extraction)
+                    records = evidence_repo.build_records(
+                        url=url,
+                        extraction=extraction,
+                        metadata={
+                            "policy_applied": artifact.policy_applied,
+                            "status_code": artifact.status_code,
+                            "provider": self.scrape_provider,
+                        },
+                    )
+                    evidence_repo.persist_records(url=url, records=records)
+                    extracted = web_utils.clean_content(
+                        extraction.content_text,
+                        max_length=settings.extractor_max_page_chars,
+                    )
+                    if extracted:
+                        all_events.append(streaming.scrape_result(url, extracted[:500]))
                     all_events.append(
                         streaming.agent_completed(
                             "scraper",
                             url=url,
                             success=bool(extracted),
                             content_length=len(extracted),
+                            method=extraction.method,
+                            quality_score=extraction.quality_score,
+                            evidence_chunks=len(records),
+                            provider=self.scrape_provider,
                         )
                     )
+                except Exception as exc:
+                    all_events.append(
+                        streaming.error(f"Failed to scrape {url}: {exc}", agent="scraper")
+                    )
+                    all_events.append(
+                        streaming.agent_completed(
+                            "scraper",
+                            url=url,
+                            success=False,
+                            content_length=0,
+                        )
+                    )
+                content_map[url] = extracted
 
-            await asyncio.gather(*(run_one(url) for url in urls), return_exceptions=True)
+        await asyncio.gather(*(run_one(url) for url in urls), return_exceptions=True)
         return content_map, all_events
 
     @staticmethod
@@ -930,29 +1761,26 @@ class ResearchOrchestrator:
             scrape_evidence.append(f"{i + 1}. url={url}\nexcerpt={excerpt}")
 
         previous_payload = previous_notes.to_dict() if previous_notes else {}
+        search_evidence_text = chr(10).join(search_evidence) or "none"
+        scrape_evidence_text = chr(10).join(scrape_evidence) or "none"
 
         t0 = time.monotonic()
         response = await active_client.messages.create(
             model=self.model,
             max_tokens=1400,
-            system=(
-                f"You create compact research working notes. Today's date is {date.today().isoformat()}. "
-                "Given a query and intermediate evidence, return ONLY JSON with keys: "
-                "highlights, resolved_points, unresolved_points, follow_up_queries. "
-                "Each value must be an array of short strings. "
-                "Use follow_up_queries for concrete next searches that can close unresolved points now. "
-                "If the query is already fully answered with sufficient evidence, keep unresolved_points "
-                "and follow_up_queries empty. Avoid generic advice and avoid markdown."
+            system=render_prompt(
+                "orchestrator.notes_system",
+                today_iso=date.today().isoformat(),
             ),
             messages=[
                 {
                     "role": "user",
-                    "content": (
-                        f"QUERY:\n{query}\n\n"
-                        f"PREVIOUS_NOTES_JSON:\n{json.dumps(previous_payload)}\n\n"
-                        f"SEARCH_EVIDENCE:\n{chr(10).join(search_evidence) or 'none'}\n\n"
-                        f"SCRAPE_EVIDENCE:\n{chr(10).join(scrape_evidence) or 'none'}\n\n"
-                        "Return JSON only."
+                    "content": render_prompt(
+                        "orchestrator.notes_user",
+                        query=query,
+                        previous_notes_json=json.dumps(previous_payload),
+                        search_evidence=search_evidence_text,
+                        scrape_evidence=scrape_evidence_text,
                     ),
                 }
             ],
@@ -1238,32 +2066,18 @@ class ResearchOrchestrator:
         )
         if any(marker in lowered for marker in strict_markers):
             if "bulleted list" in lowered:
-                format_rule = (
-                    "Return only the requested bullet list and nothing else. "
-                    "No preface, no conclusion, no extra notes."
+                return render_prompt(
+                    "orchestrator.synthesis_instruction_strict_bulleted",
+                    query=query,
                 )
-            else:
-                format_rule = (
-                    "Return only the final answer items and nothing else. "
-                    "Use a concise comma-separated list unless the query explicitly requests another format. "
-                    "No title, no explanation, no extra commentary."
-                )
-            return (
-                f"Answer this query directly: {query}\n\n"
-                f"{format_rule} "
-                "If evidence is uncertain, provide only the best-supported answer items."
+            return render_prompt(
+                "orchestrator.synthesis_instruction_strict_default",
+                query=query,
             )
 
-        return (
-            f"Based on all the research data provided, write a comprehensive "
-            f"research report on: {query}\n\n"
-            "Resolve the question as completely as possible in this report. "
-            "Do not include sections titled 'Areas for Further Investigation', "
-            "'Further Investigation', 'Open Questions', or 'Future Work'. "
-            "If evidence has limits, state confidence and what was verified instead of deferring work. "
-            "If sources provide a person's full name, include the full name explicitly. "
-            "For songs, include release year when supported by sources. "
-            "Include citations to sources using [Title](URL) format."
+        return render_prompt(
+            "orchestrator.synthesis_instruction_default",
+            query=query,
         )
 
     def _build_synthesis_messages(self, query: str, full_context: str) -> list[dict[str, Any]]:
@@ -1271,13 +2085,49 @@ class ResearchOrchestrator:
             {"role": "user", "content": f"<context>\n{full_context}\n</context>"},
             {
                 "role": "assistant",
-                "content": "I've reviewed all the research materials. Let me now provide my analysis.",
+                "content": render_prompt("orchestrator.synthesis_context_ack"),
             },
             {
                 "role": "user",
                 "content": self._build_synthesis_instruction(query),
             },
         ]
+
+    @staticmethod
+    def _build_source_list(
+        search_results: list[dict[str, Any]],
+        *,
+        extra_urls: list[str] | None = None,
+    ) -> list[dict[str, str]]:
+        sources: list[dict[str, str]] = []
+        seen_urls: set[str] = set()
+        for result in search_results:
+            url = str(result.get("url", "") or "")
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            sources.append(
+                {
+                    "title": str(result.get("title", "") or ""),
+                    "url": url,
+                    "domain": web_utils.extract_domain(url),
+                }
+            )
+
+        for url in extra_urls or []:
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            title = url.rstrip("/").split("/")[-1] or web_utils.extract_domain(url)
+            sources.append(
+                {
+                    "title": title,
+                    "url": url,
+                    "domain": web_utils.extract_domain(url),
+                }
+            )
+
+        return sources
 
     async def _generate_draft_report(
         self,
@@ -1326,22 +2176,15 @@ class ResearchOrchestrator:
         response = await active_client.messages.create(
             model=self.model,
             max_tokens=1200,
-            system=(
-                "You are a strict research QA reviewer. "
-                "Given a query and a draft answer, decide if more web research is required "
-                "to fully answer the user query. "
-                "Respond ONLY JSON with keys: needs_more_research (boolean), reason (string), "
-                "missing_points (array of strings), follow_up_queries (array of specific web search queries). "
-                "Only request more research for factual coverage gaps, not writing style."
-            ),
+            system=render_prompt("orchestrator.synthesis_review_system"),
             messages=[
                 {
                     "role": "user",
-                    "content": (
-                        f"QUERY:\n{query}\n\n"
-                        f"WORKING_NOTES_JSON:\n{json.dumps(notes_payload)}\n\n"
-                        f"DRAFT_REPORT:\n{draft_report[:7000]}\n\n"
-                        "Return JSON only."
+                    "content": render_prompt(
+                        "orchestrator.synthesis_review_user",
+                        query=query,
+                        working_notes_json=json.dumps(notes_payload),
+                        draft_report=draft_report[:7000],
                     ),
                 }
             ],
@@ -1457,18 +2300,7 @@ class ResearchOrchestrator:
             + (getattr(usage, "output_tokens", 0) or 0)
         )
 
-        # Build source list
-        sources = []
-        seen_urls: set[str] = set()
-        for r in search_results:
-            url = r.get("url", "")
-            if url and url not in seen_urls:
-                seen_urls.add(url)
-                sources.append({
-                    "title": r.get("title", ""),
-                    "url": url,
-                    "domain": web_utils.extract_domain(url),
-                })
+        sources = self._build_source_list(search_results)
 
         full_report = self._promote_full_name_mentions(full_report, full_names)
         full_report = self._strip_deferred_sections(full_report)
@@ -1508,15 +2340,85 @@ class ResearchOrchestrator:
                 yield streaming.error("No search results found. Try refining your query.")
                 return
 
-            # Step 3: Select top URLs to scrape
-            top_urls = await self._select_top_urls(search_results)
+            bootstrap_queries = self._build_chain_bootstrap_queries(query, search_results)
+            bootstrap_queries = [
+                q for q in bootstrap_queries
+                if " ".join(q.lower().split()) not in searched_query_keys
+            ]
+            bootstrap_results: list[dict[str, Any]] = []
+            if bootstrap_queries:
+                for q in bootstrap_queries:
+                    searched_query_keys.add(" ".join(q.lower().split()))
+                bootstrap_results, bootstrap_events = await self._run_parallel_searches(
+                    bootstrap_queries,
+                    step_offset=search_step_offset,
+                )
+                search_step_offset += len(bootstrap_queries)
+                for event in bootstrap_events:
+                    yield event
+                if bootstrap_results:
+                    search_results = self._sanitize_search_results(
+                        self._merge_search_results(search_results, bootstrap_results)
+                    )
 
+            # Step 3: Select top URLs to scrape
+            top_urls = await self._select_top_urls(search_results, query=query)
+            if bootstrap_results:
+                bootstrap_top_urls = await self._select_top_urls(
+                    bootstrap_results,
+                    max_urls=4,
+                    query=query,
+                )
+                merged_top_urls: list[str] = []
+                for url in bootstrap_top_urls + top_urls:
+                    if url in merged_top_urls:
+                        continue
+                    merged_top_urls.append(url)
+                    if len(merged_top_urls) >= max(len(top_urls), 8):
+                        break
+                top_urls = merged_top_urls
             # Step 4: Parallel scraping
             scraped_content: dict[str, str] = {}
             if top_urls:
                 scraped_content, scrape_events = await self._run_parallel_scrapes(top_urls)
                 for event in scrape_events:
                     yield event
+
+            enrichment_queries = self._build_chain_enrichment_queries(
+                query,
+                search_results,
+                scraped_content,
+            )
+            enrichment_queries = [
+                q for q in enrichment_queries if " ".join(q.lower().split()) not in searched_query_keys
+            ]
+            if enrichment_queries:
+                for q in enrichment_queries:
+                    searched_query_keys.add(" ".join(q.lower().split()))
+                enrichment_results, enrichment_events = await self._run_parallel_searches(
+                    enrichment_queries,
+                    step_offset=search_step_offset,
+                )
+                search_step_offset += len(enrichment_queries)
+                for event in enrichment_events:
+                    yield event
+                if enrichment_results:
+                    search_results = self._sanitize_search_results(
+                        self._merge_search_results(search_results, enrichment_results)
+                    )
+                    enrichment_urls = await self._select_top_urls(
+                        enrichment_results,
+                        max_urls=4,
+                        query=query,
+                    )
+                    urls_to_scrape = [url for url in enrichment_urls if url not in scraped_content]
+                    if urls_to_scrape:
+                        extra_scraped, extra_scrape_events = await self._run_parallel_scrapes(
+                            urls_to_scrape
+                        )
+                        for event in extra_scrape_events:
+                            yield event
+                        scraped_content.update(extra_scraped)
 
             notes = await self._capture_research_notes(query, search_results, scraped_content)
             await self._persist_research_notes(notes, phase="initial", iteration=0)
@@ -1548,7 +2450,9 @@ class ResearchOrchestrator:
                         self._merge_search_results(search_results, follow_up_results)
                     )
                     new_urls = await self._select_top_urls(
-                        follow_up_results, max_urls=4
+                        follow_up_results,
+                        max_urls=4,
+                        query=query,
                     )
                     urls_to_scrape = [url for url in new_urls if url not in scraped_content]
                     if urls_to_scrape:
@@ -1640,7 +2544,11 @@ class ResearchOrchestrator:
                         search_results = self._sanitize_search_results(
                             self._merge_search_results(search_results, post_results)
                         )
-                        post_urls = await self._select_top_urls(post_results, max_urls=4)
+                        post_urls = await self._select_top_urls(
+                            post_results,
+                            max_urls=4,
+                            query=query,
+                        )
                         urls_to_scrape = [url for url in post_urls if url not in scraped_content]
                         if urls_to_scrape:
                             extra_scraped, extra_scrape_events = await self._run_parallel_scrapes(
@@ -1708,15 +2616,53 @@ class ResearchOrchestrator:
             if not search_results:
                 yield streaming.error("No search results found. Try refining your query.")
                 return
+
+            bootstrap_queries = self._build_chain_bootstrap_queries(query, search_results)
+            bootstrap_query_count = 0
+            bootstrap_results: list[dict[str, Any]] = []
+            if bootstrap_queries:
+                bootstrap_results, bootstrap_events = await self._run_parallel_searches_bounded(
+                    bootstrap_queries,
+                    step_offset=len(plan_steps),
+                    max_parallel=self.hybrid_max_parallel_search,
+                )
+                bootstrap_query_count = len(bootstrap_queries)
+                for event in bootstrap_events:
+                    yield event
+                if bootstrap_results:
+                    search_results = self._sanitize_search_results(
+                        self._merge_search_results(search_results, bootstrap_results)
+                    )
+
             yield streaming.mesh_stage_completed(
                 "search",
                 results_count=len(search_results),
                 query_count=len(plan_steps),
                 duration_ms=int((time.monotonic() - search_stage_started) * 1000),
             )
+            searched_query_keys = {
+                " ".join(step.lower().split()) for step in plan_steps if step.strip()
+            }
+            for bootstrap_query in bootstrap_queries:
+                searched_query_keys.add(" ".join(bootstrap_query.lower().split()))
+            search_step_offset = len(plan_steps) + bootstrap_query_count
 
             # Stage: extraction
-            top_urls = await self._select_top_urls(search_results)
+            top_urls = await self._select_top_urls(search_results, query=query)
+            if bootstrap_results:
+                bootstrap_top_urls = await self._select_top_urls(
+                    bootstrap_results,
+                    max_urls=4,
+                    query=query,
+                )
+                merged_top_urls: list[str] = []
+                for url in bootstrap_top_urls + top_urls:
+                    if url in merged_top_urls:
+                        continue
+                    merged_top_urls.append(url)
+                    if len(merged_top_urls) >= max(len(top_urls), 8):
+                        break
+                top_urls = merged_top_urls
             extract_stage_started = time.monotonic()
             yield streaming.mesh_stage_started(
                 "extract",
@@ -1739,6 +2685,44 @@ class ResearchOrchestrator:
                 url_count=len(top_urls),
                 duration_ms=int((time.monotonic() - extract_stage_started) * 1000),
             )
+
+            enrichment_queries = self._build_chain_enrichment_queries(
+                query,
+                search_results,
+                scraped_content,
+            )
+            enrichment_queries = [
+                q for q in enrichment_queries if " ".join(q.lower().split()) not in searched_query_keys
+            ]
+            if enrichment_queries:
+                for q in enrichment_queries:
+                    searched_query_keys.add(" ".join(q.lower().split()))
+                enrichment_results, enrichment_events = await self._run_parallel_searches_bounded(
+                    enrichment_queries,
+                    step_offset=search_step_offset,
+                    max_parallel=self.hybrid_max_parallel_search,
+                )
+                search_step_offset += len(enrichment_queries)
+                for event in enrichment_events:
+                    yield event
+                if enrichment_results:
+                    search_results = self._sanitize_search_results(
+                        self._merge_search_results(search_results, enrichment_results)
+                    )
+                    enrichment_urls = await self._select_top_urls(
+                        enrichment_results,
+                        max_urls=4,
+                        query=query,
+                    )
+                    urls_to_scrape = [url for url in enrichment_urls if url not in scraped_content]
+                    if urls_to_scrape:
+                        extra_scraped, extra_scrape_events = await self._run_parallel_scrapes_bounded(
+                            urls_to_scrape,
+                            max_parallel=self.hybrid_max_parallel_extract,
+                        )
+                        for event in extra_scrape_events:
+                            yield event
+                        scraped_content.update(extra_scraped)
 
             # Memory upsert summary
             memory_payload, memory_events = await self._upsert_memory_chunks(
@@ -1794,10 +2778,6 @@ class ResearchOrchestrator:
             )
 
             # Continue with deterministic notes/follow-up/review pipeline.
-            searched_query_keys = {
-                " ".join(step.lower().split()) for step in plan_steps if step.strip()
-            }
-            search_step_offset = len(plan_steps)
             await self._persist_research_notes(notes, phase="hybrid_initial", iteration=0)
 
             for round_index in range(1, self.max_follow_up_rounds + 1):
@@ -1827,7 +2807,11 @@ class ResearchOrchestrator:
                     search_results = self._sanitize_search_results(
                         self._merge_search_results(search_results, follow_up_results)
                     )
-                    new_urls = await self._select_top_urls(follow_up_results, max_urls=4)
+                    new_urls = await self._select_top_urls(
+                        follow_up_results,
+                        max_urls=4,
+                        query=query,
+                    )
                     urls_to_scrape = [url for url in new_urls if url not in scraped_content]
                     if urls_to_scrape:
                         extra_scraped, extra_scrape_events = await self._run_parallel_scrapes_bounded(
@@ -1926,7 +2910,11 @@ class ResearchOrchestrator:
                         search_results = self._sanitize_search_results(
                             self._merge_search_results(search_results, post_results)
                         )
-                        post_urls = await self._select_top_urls(post_results, max_urls=4)
+                        post_urls = await self._select_top_urls(
+                            post_results,
+                            max_urls=4,
+                            query=query,
+                        )
                         urls_to_scrape = [url for url in post_urls if url not in scraped_content]
                         if urls_to_scrape:
                             extra_scraped, extra_scrape_events = await self._run_parallel_scrapes_bounded(

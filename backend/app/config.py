@@ -4,9 +4,10 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     # OpenRouter (required)
     openrouter_api_key: str
-    default_model: str = "openai/gpt-4o-mini"
-    openrouter_model: str = ""  # Optional override for default_model
-    benchmark_judge_model: str = "openai/gpt-4o-mini"
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    default_model: str
+    openrouter_model: str
+    benchmark_judge_model: str
 
     # Tavily
     tavily_api_key: str
@@ -32,6 +33,14 @@ class Settings(BaseSettings):
     extractor_retry_enabled: bool = True
     extractor_retry_max: int = 1
     extract_in_thread: bool = True
+    scrape_headless_default: bool = True
+    scrape_quality_threshold: float = 0.55
+    scrape_pipeline_max_parallel: int = 4
+    scrape_retry_max: int = 1
+    scrape_provider: str = "firecrawl"  # firecrawl | jina_reader | playwright | auto
+    firecrawl_base_url: str = "http://localhost:3002"  # self-hosted Firecrawl
+    firecrawl_api_key: str = ""  # optional for self-hosted deployments
+    jina_reader_base_url: str = ""  # optional fallback, keep empty for local-only
 
     # Hybrid staged + bounded mesh execution
     hybrid_mode_enabled: bool = False

@@ -5,6 +5,7 @@ from typing import Any
 
 from app.agents.base import BaseAgent
 from app.models.events import SSEEvent
+from app.services.prompt_store import render_prompt
 from app.services import streaming
 from app.tools import search_provider
 
@@ -17,17 +18,10 @@ class SearchAgent(BaseAgent):
     @property
     def system_prompt(self) -> str:
         today = date.today()
-        return (
-            f"You are a web search specialist. Today's date is {today.isoformat()} ({today.year}). "
-            "Given a research query, use the search tool "
-            "to find the most relevant and recent information. "
-            "First, execute one search using the user's query verbatim. "
-            "Then run additional focused searches to resolve entities and verify facts. "
-            "For entity resolution, prefer canonical sources (e.g., site:wikipedia.org) before secondary sources. "
-            f"Always include the current year ({today.year}) in your search queries when looking for "
-            "current data, statistics, or recent developments. "
-            "Search multiple angles if needed. "
-            "After searching, summarize the key findings with source URLs."
+        return render_prompt(
+            "search_agent.system_prompt",
+            today_iso=today.isoformat(),
+            today_year=today.year,
         )
     tools = [
         {

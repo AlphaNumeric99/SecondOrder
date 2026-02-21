@@ -87,6 +87,14 @@ class OpenRouterMessagesAdapter:
     def __init__(self, openai_client: Any):
         self._client = openai_client
 
+    @staticmethod
+    def _temperature_for_model(model: str) -> int:
+        # Some OpenAI GPT-5-compatible gateways reject temperature=0.
+        lowered = (model or "").lower()
+        if "gpt-5" in lowered:
+            return 1
+        return 0
+
     def _to_openai_messages(self, system: str, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         openai_messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
 
@@ -204,7 +212,7 @@ class OpenRouterMessagesAdapter:
             "model": model,
             "messages": self._to_openai_messages(system, messages),
             "max_tokens": max_tokens,
-            "temperature": 0,
+            "temperature": self._temperature_for_model(model),
         }
         if tools:
             kwargs["tools"] = self._to_openai_tools(tools)
@@ -225,7 +233,7 @@ class OpenRouterMessagesAdapter:
             model=model,
             messages=self._to_openai_messages(system, messages),
             max_tokens=max_tokens,
-            temperature=0,
+            temperature=self._temperature_for_model(model),
             stream=True,
             stream_options={"include_usage": True},
         )
@@ -242,9 +250,10 @@ def get_client() -> OpenRouterClientAdapter:
     from openai import AsyncOpenAI
 
     sanitize_ssl_keylogfile()
+    base_url = settings.openrouter_base_url.strip() or "https://openrouter.ai/api/v1"
     openai_client = AsyncOpenAI(
         api_key=settings.openrouter_api_key,
-        base_url="https://openrouter.ai/api/v1",
+        base_url=base_url,
     )
     return OpenRouterClientAdapter(openai_client)
 

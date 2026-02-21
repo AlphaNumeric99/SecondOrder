@@ -20,9 +20,69 @@ class StepSearchResult:
     fallback_reason: str | None = None
 
 
+def _normalize_step_text(step: str) -> str:
+    cleaned = " ".join(step.split()).strip()
+    if not cleaned:
+        return ""
+
+    # Planner models occasionally emit prose such as:
+    # "Search X ... — query: site:example.com ..."
+    query_match = re.search(r"\b(?:search\s+)?query\s*[:\-]\s*(.+)$", cleaned, flags=re.IGNORECASE)
+    if query_match:
+        cleaned = query_match.group(1).strip()
+
+    for separator in (" — ", " – ", " - "):
+        if separator not in cleaned:
+            continue
+        left, _ = cleaned.split(separator, 1)
+        left = left.strip()
+        if not left:
+            continue
+        if "site:" in left.lower():
+            cleaned = left
+            break
+
+    # Normalize mixed prose + site-operator planner output while preserving core context.
+    site_tokens = [
+        token.rstrip(").,;:")
+        for token in re.findall(r"site:[^\s)]+", cleaned, flags=re.IGNORECASE)
+    ]
+    if site_tokens:
+        primary_site = site_tokens[0]
+        lowered = cleaned.lower()
+        if lowered.startswith("site:"):
+            # Keep primary site first, but still clean trailing punctuation/noise.
+            remainder = re.sub(
+                r"^site:[^\s)]+",
+                "",
+                cleaned,
+                count=1,
+                flags=re.IGNORECASE,
+            ).strip(" -—:;,.()")
+            cleaned = f"{primary_site} {remainder}".strip()
+        else:
+            # Remove inline site-token wrappers like "(site:example.com)" and append site at end.
+            without_site = re.sub(
+                r"\(?\s*site:[^\s)]+\s*\)?",
+                " ",
+                cleaned,
+                flags=re.IGNORECASE,
+            )
+            without_site = re.sub(r"\bsource\s*:\s*", "", without_site, flags=re.IGNORECASE)
+            without_site = " ".join(without_site.split()).strip(" -—:;,.()")
+            cleaned = f"{without_site} {primary_site}".strip() if without_site else primary_site
+
+    # Remove unresolved placeholders from planner output.
+    cleaned = re.sub(r"\[[^\]]+\]", "", cleaned)
+    cleaned = re.sub(r"\(\s*\)", "", cleaned)
+    cleaned = re.sub(r'"\s*"', "", cleaned)
+    cleaned = " ".join(cleaned.split()).strip()
+    return cleaned
+
+
 def build_step_queries(step: str, *, max_queries: int) -> list[str]:
     """Build deterministic, search-friendly query variants for one plan step."""
-    cleaned = " ".join(step.split()).strip()
+    cleaned = _normalize_step_text(step)
     if not cleaned:
         return []
 
@@ -52,15 +112,17 @@ def build_step_queries(step: str, *, max_queries: int) -> list[str]:
     ]
     for source in source_mentions[:2]:
         queries.append(f'"{source}" {cleaned}')
-        source_lower = source.lower()
-        if "world population review" in source_lower:
-            queries.append(f"{cleaned} site:worldpopulationreview.com")
-        if "vision of humanity" in source_lower:
-            queries.append(f"{cleaned} site:visionofhumanity.org")
-        if "organized crime index" in source_lower or "organised crime index" in source_lower:
-            queries.append(f"{cleaned} site:ocindex.net")
-        if "migration observatory" in source_lower or "observatory of migration" in source_lower:
-            queries.append(f"{cleaned} site:ox.ac.uk")
+
+    source_domains = [
+        match.rstrip(").,;:").lower()
+        for match in re.findall(
+            r"\bsource\s*:\s*([a-z0-9.-]+\.[a-z]{2,})",
+            step,
+            flags=re.IGNORECASE,
+        )
+    ]
+    for domain in source_domains[:2]:
+        queries.append(f"{cleaned} site:{domain}")
 
     years = list(dict.fromkeys(re.findall(r"\b(?:19|20)\d{2}\b", cleaned)))
     if years:

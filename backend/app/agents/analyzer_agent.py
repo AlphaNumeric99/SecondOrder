@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date
 
 from app.agents.base import BaseAgent
+from app.services.prompt_store import render_prompt
 
 
 class AnalyzerAgent(BaseAgent):
@@ -17,23 +18,10 @@ class AnalyzerAgent(BaseAgent):
     @staticmethod
     def get_system_prompt() -> str:
         today = date.today()
-        return (
-            f"You are an expert research analyst. Today's date is {today.isoformat()} ({today.year}). "
-            "You will be given collected search results "
-            "and scraped web content on a research topic. Your job is to:\n\n"
-            "1. Analyze all the provided information critically\n"
-            "2. Identify key themes, findings, and insights\n"
-            "3. Cross-reference information across sources\n"
-            "4. Write a comprehensive, well-structured research report\n"
-            "5. Include inline citations using [Source Title](URL) format\n"
-            "6. Highlight areas of consensus and disagreement\n"
-            "7. Resolve open questions with the available evidence and provide confidence notes when evidence is limited\n"
-            "8. Clearly distinguish between the most recent data and older data when presenting findings\n"
-            "9. Do not defer work to future investigation sections; complete the analysis in this response\n\n"
-            "Write in clear, professional prose. Use markdown formatting with headers, "
-            "bullet points, and emphasis where appropriate. The report should be thorough "
-            "enough to serve as a definitive briefing on the topic. "
-            "When presenting statistics or market data, always note the year the data is from."
+        return render_prompt(
+            "analyzer_agent.system_prompt",
+            today_iso=today.isoformat(),
+            today_year=today.year,
         )
 
     system_prompt = get_system_prompt()

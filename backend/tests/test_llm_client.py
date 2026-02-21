@@ -47,6 +47,7 @@ class TestGetClient:
     def test_get_client_uses_openrouter(self):
         with patch("app.llm_client.settings") as mock_settings:
             mock_settings.openrouter_api_key = "sk-or-valid-key"
+            mock_settings.openrouter_base_url = "https://openrouter.ai/api/v1"
 
             openai_module = types.ModuleType("openai")
             mock_openai = MagicMock()

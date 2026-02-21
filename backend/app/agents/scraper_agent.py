@@ -5,6 +5,7 @@ from typing import Any
 from app.agents.base import BaseAgent
 from app.config import settings
 from app.models.events import SSEEvent
+from app.services.prompt_store import render_prompt
 from app.services import streaming
 from app.tools import content_extractor, hasdata_scraper, web_utils
 
@@ -13,11 +14,7 @@ class ScraperAgent(BaseAgent):
     """Agent that scrapes web pages to extract detailed content."""
 
     name = "scraper"
-    system_prompt = (
-        "You are a web content extraction specialist. Given URLs, use the scrape tool "
-        "to extract their full content. Focus on extracting the most relevant information "
-        "from each page. Summarize the key content from each source."
-    )
+    system_prompt = render_prompt("scraper_agent.system_prompt")
     tools = [
         {
             "name": "scrape_url",

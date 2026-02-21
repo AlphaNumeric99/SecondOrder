@@ -138,43 +138,59 @@ async def test_create_message_writes_metadata_as_object():
 
 
 @pytest.mark.asyncio
-async def test_run_parallel_scrapes_emits_completion_per_url():
+async def test_run_parallel_scrapes_emits_completion_per_url(tmp_path):
     from app.agents.orchestrator import ResearchOrchestrator
-    from app.tools.hasdata_scraper import ScrapeResult
+    from app.research_core.models.interfaces import ExtractionResult, ScrapeArtifact
 
     urls = ["https://example.com/a", "https://example.com/b"]
 
-    def fake_extract(url: str, raw_content: str, max_chars: int):
-        payload = SimpleNamespace()
-        payload.text = "content a" if url.endswith("/a") else ""
-        payload.method = "test"
-        payload.fallback_used = False
-        return payload
+    class FakeScrapeService:
+        async def scrape(self, request):
+            html_path = tmp_path / f"{request.url.split('/')[-1]}.html"
+            html_path.write_text("<html>ok</html>", encoding="utf-8")
+            return ScrapeArtifact(
+                url=request.url,
+                final_url=request.url,
+                status_code=200,
+                rendered_html_path=str(html_path),
+                screenshot_path=None,
+                timing_ms=1,
+                attempts=1,
+                policy_applied="default",
+            )
 
-    async def fake_scrape(url: str, **kwargs):
-        content = "<html>content a</html>" if url.endswith("/a") else "<html></html>"
-        return ScrapeResult(
-            url=url,
-            content=content,
-            status_code=200,
-            output_format="html",
-            from_cache=True,
-        )
+    class FakeExtractService:
+        def extract(self, *, url: str, raw_html: str, quality_threshold: float):
+            text = "content a" if url.endswith("/a") else ""
+            return ExtractionResult(
+                url=url,
+                method="trafilatura",
+                quality_score=0.9 if text else 0.1,
+                quality_flags=[],
+                content_text=text,
+                content_hash="hash-a" if text else "hash-b",
+            )
 
-    class DummyAsyncClient:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
+    class FakeEvidenceRepo:
+        def persist_artifact(self, artifact):
             return None
 
-    with (
-        patch("app.agents.orchestrator.httpx.AsyncClient", return_value=DummyAsyncClient()),
-        patch("app.agents.orchestrator.hasdata_scraper.scrape", new=AsyncMock(side_effect=fake_scrape)),
-        patch("app.agents.orchestrator.content_extractor.extract_main_content", side_effect=fake_extract),
-    ):
-        orchestrator = ResearchOrchestrator(model="openai/gpt-4o-mini")
-        _, events = await orchestrator._run_parallel_scrapes(urls)
+        def persist_extraction(self, extraction):
+            return None
+
+        def build_records(self, *, url, extraction, metadata=None):
+            return []
+
+        def persist_records(self, *, url, records):
+            return None
+
+    orchestrator = ResearchOrchestrator(model="openai/gpt-4o-mini")
+    orchestrator._get_scrape_services = lambda: (  # type: ignore[method-assign]
+        FakeScrapeService(),
+        FakeExtractService(),
+        FakeEvidenceRepo(),
+    )
+    _, events = await orchestrator._run_parallel_scrapes(urls)
 
     completed = [
         e for e in events

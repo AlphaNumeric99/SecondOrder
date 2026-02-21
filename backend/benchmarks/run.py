@@ -1,7 +1,7 @@
 """CLI runner for SecondOrder benchmarks.
 
 Usage:
-  python -m benchmarks.run draco --limit 10 --model openai/gpt-4o-mini
+  python -m benchmarks.run draco --limit 10
   python -m benchmarks.run researchrubrics --limit 5
   python -m benchmarks.run deepsearchqa --limit 20
   python -m benchmarks.run all --limit 5
@@ -22,6 +22,7 @@ load_dotenv()
 from benchmarks.draco import DRACOBenchmark
 from benchmarks.research_rubrics import ResearchRubricsBenchmark
 from benchmarks.deepsearchqa import DeepSearchQABenchmark
+from app.llm_client import get_model
 
 BENCHMARKS = {
     "draco": DRACOBenchmark,
@@ -44,12 +45,6 @@ async def main():
         help="Max number of tasks to run (default: all)",
     )
     parser.add_argument(
-        "--model", "-m",
-        type=str,
-        default="openai/gpt-4o-mini",
-        help="Model to use for research",
-    )
-    parser.add_argument(
         "--output", "-o",
         type=str,
         default="benchmarks/results",
@@ -57,6 +52,7 @@ async def main():
     )
 
     args = parser.parse_args()
+    model = get_model()
 
     if args.benchmark == "all":
         benchmarks_to_run = list(BENCHMARKS.values())
@@ -66,7 +62,7 @@ async def main():
     for BenchmarkClass in benchmarks_to_run:
         bench = BenchmarkClass()
         await bench.run(
-            model=args.model,
+            model=model,
             limit=args.limit,
             output_dir=args.output,
         )
