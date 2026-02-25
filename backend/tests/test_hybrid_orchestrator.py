@@ -11,9 +11,9 @@ from app.services import streaming
 
 
 @pytest.mark.asyncio
-async def test_hybrid_orchestrator_emits_mesh_and_verification_events(monkeypatch):
-    monkeypatch.setattr("app.agents.orchestrator.settings.hybrid_mode_enabled", True)
-    monkeypatch.setattr("app.agents.orchestrator.settings.hybrid_shadow_mode", False)
+async def test_orchestrator_emits_mesh_and_verification_events(monkeypatch):
+    """Test that the default execution path emits all expected events."""
+    monkeypatch.setattr("app.agents.orchestrator.settings.shadow_mode", False)
 
     orchestrator = ResearchOrchestrator(model="openai/gpt-4o-mini", session_id="s1")
 
@@ -99,16 +99,18 @@ async def test_hybrid_orchestrator_emits_mesh_and_verification_events(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_research_dispatches_to_legacy_when_hybrid_disabled(monkeypatch):
-    monkeypatch.setattr("app.agents.orchestrator.settings.hybrid_mode_enabled", False)
+async def test_orchestrator_uses_default_execution_path(monkeypatch):
+    """Test that research() always uses the default execution path (no legacy dispatch)."""
+    monkeypatch.setattr("app.agents.orchestrator.settings.shadow_mode", True)
 
     orchestrator = ResearchOrchestrator(model="openai/gpt-4o-mini")
 
-    async def fake_legacy(_query: str):
-        yield streaming.plan_created(["legacy"])
-        yield streaming.research_complete(report="legacy", sources=[], tokens_used=1)
+    # Mock the _execute_research method to track which path is taken
+    async def fake_execute_research(_query: str):
+        yield streaming.plan_created(["default"])
+        yield streaming.research_complete(report="default", sources=[], tokens_used=1)
 
-    orchestrator._research_legacy = fake_legacy  # type: ignore[method-assign]
+    orchestrator._execute_research = fake_execute_research  # type: ignore[method-assign]
 
     events = [event async for event in orchestrator.research("test query")]
     assert [event.event.value for event in events] == ["plan_created", "research_complete"]

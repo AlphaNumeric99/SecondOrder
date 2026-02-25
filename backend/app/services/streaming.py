@@ -3,10 +3,38 @@ from __future__ import annotations
 from typing import Any
 
 from app.models.events import EventType, SSEEvent
+from app.models.research_plan import ResearchPlan
 
 
-def plan_created(steps: list[str]) -> SSEEvent:
-    return SSEEvent(event=EventType.PLAN_CREATED, data={"steps": steps})
+def plan_created(research_plan: ResearchPlan) -> SSEEvent:
+    """Emit plan created event with structured research plan."""
+    return SSEEvent(
+        event=EventType.PLAN_CREATED,
+        data={
+            "id": research_plan.id,
+            "original_query": research_plan.original_query,
+            "steps": [
+                {
+                    "id": step.id,
+                    "query": step.query,
+                    "purpose": step.purpose,
+                    "dependencies": step.dependencies,
+                    "status": step.status.value,
+                }
+                for step in research_plan.steps
+            ],
+            "version": research_plan.version,
+            "created_at": research_plan.created_at,
+        },
+    )
+
+
+def plan_revised(old_step_id: str, new_steps: list[dict[str, Any]]) -> SSEEvent:
+    """Emit plan revised event when a step is revised during research."""
+    return SSEEvent(
+        event=EventType.PLAN_REVISED,
+        data={"old_step_id": old_step_id, "new_steps": new_steps},
+    )
 
 
 def execution_compiled(summary: dict[str, Any]) -> SSEEvent:

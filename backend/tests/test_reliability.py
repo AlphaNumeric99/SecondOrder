@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from app.api.routes.research import _event_step_key, start_research
 from app.models.schemas import ResearchRequest
-from app.services import supabase as db
+from app.services import database as db
 
 
 def test_event_step_key_is_stable_for_scraper_url():

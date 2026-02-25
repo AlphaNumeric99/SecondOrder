@@ -104,9 +104,10 @@ class TestOrchestratorPlan:
                 'that won "Research Excellence Award" in 2010.'
             )
             plan = await orchestrator._generate_plan(query)
-            assert len(plan) >= 3
-            assert any("wikipedia" in step.lower() for step in plan)
-            assert query in plan
+            assert len(plan) >= 4
+            assert "winner" in plan[0].lower()
+            assert any("timeline" in step.lower() for step in plan)
+            assert any("book" in step.lower() for step in plan)
 
 
 class TestURLSelection:
@@ -284,5 +285,40 @@ class TestURLSelection:
             assert any("Andrew Jackson Jihad" in q for q in queries)
             assert not any("joined 2016 left 2021" in q for q in queries)
             assert not any("Roar" in q for q in queries)
+
+
+class TestPromptBookending:
+    def test_bookend_query_context_query_pattern(self):
+        from app.agents import orchestrator as orch_module
+
+        with (
+            patch.object(orch_module.settings, "prompt_bookend_enabled", True),
+            patch.object(orch_module.settings, "prompt_bookend_pattern", "query_context_query"),
+        ):
+            orchestrator = orch_module.ResearchOrchestrator()
+            wrapped = orchestrator._bookend_query_context("Find X", "Evidence about X")
+
+            assert wrapped.count("<query>") == 2
+            assert wrapped.count("<context>") == 1
+            assert wrapped.index("<query>") < wrapped.index("<context>")
+
+    def test_build_synthesis_messages_collapses_to_single_user_message_when_bookended(self):
+        from app.agents import orchestrator as orch_module
+
+        with (
+            patch.object(orch_module.settings, "prompt_bookend_enabled", True),
+            patch.object(orch_module.settings, "prompt_bookend_pattern", "query_context_query"),
+        ):
+            orchestrator = orch_module.ResearchOrchestrator()
+            messages = orchestrator._build_synthesis_messages(
+                "Only provide country names.",
+                "Source A says ... Source B says ...",
+            )
+
+            assert len(messages) == 1
+            assert messages[0]["role"] == "user"
+            content = messages[0]["content"]
+            assert content.count("<query>") >= 2
+            assert "<context>" in content
 
 

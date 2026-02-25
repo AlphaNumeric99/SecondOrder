@@ -51,3 +51,4 @@ backend/.cache/
 # Codex workspace
 .codex/
 .cache/*
+backend/trace_runs/*

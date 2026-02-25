@@ -8,7 +8,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException
 
 from app.models.schemas import MessageResponse, SessionDetailResponse, SessionResponse
-from app.services import supabase as db
+from app.services import database as db
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 

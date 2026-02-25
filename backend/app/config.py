@@ -43,12 +43,11 @@ class Settings(BaseSettings):
     firecrawl_api_key: str = ""  # optional for self-hosted deployments
     jina_reader_base_url: str = ""  # optional fallback, keep empty for local-only
 
-    # Hybrid staged + bounded mesh execution
-    hybrid_mode_enabled: bool = False
-    hybrid_shadow_mode: bool = True
-    hybrid_max_parallel_search: int = 4
-    hybrid_max_parallel_extract: int = 6
-    hybrid_max_parallel_verify: int = 4
+    # Staged + bounded mesh execution
+    shadow_mode: bool = True
+    max_parallel_search: int = 4
+    max_parallel_extract: int = 6
+    max_parallel_verify: int = 4
 
     # Memory / embeddings
     memory_backend: str = "chromadb"  # chromadb
@@ -60,6 +59,8 @@ class Settings(BaseSettings):
 
     # Orchestration quality/speed controls
     synthesis_context_char_budget: int = 45000
+    prompt_bookend_enabled: bool = False
+    prompt_bookend_pattern: str = "query_context_query"  # query_context_query | context_query_query | query_context | context_query
     review_mode: str = "conditional"  # conditional | always | off
     review_min_supported_ratio: float = 0.6
     review_min_citations: int = 2
@@ -68,9 +69,10 @@ class Settings(BaseSettings):
     max_post_synthesis_review_rounds: int = 1
     max_post_synthesis_follow_up_queries: int = 2
 
-    # Supabase
-    supabase_url: str
-    supabase_anon_key: str
+    # PostgreSQL database
+    database_url: str = ""  # postgresql://user:pass@localhost:5432/dbname
+    supabase_url: str = ""  # deprecated, kept for backwards compatibility
+    supabase_anon_key: str = ""
 
     # App
     cors_origins: str = "http://localhost:3000"

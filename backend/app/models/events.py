@@ -8,6 +8,7 @@ from typing import Any
 
 class EventType(str, Enum):
     PLAN_CREATED = "plan_created"
+    PLAN_REVISED = "plan_revised"
     EXECUTION_COMPILED = "execution_compiled"
     MESH_STAGE_STARTED = "mesh_stage_started"
     MESH_STAGE_COMPLETED = "mesh_stage_completed"

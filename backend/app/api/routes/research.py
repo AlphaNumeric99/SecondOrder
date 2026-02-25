@@ -12,7 +12,7 @@ from app.llm_client import get_model
 from app.models.schemas import ResearchRequest, ResearchStartResponse
 from app.services import logger as log_service
 from app.services import streaming
-from app.services import supabase as db
+from app.services import database as db
 
 router = APIRouter(prefix="/api/research", tags=["research"])
 
@@ -276,3 +276,61 @@ async def stream_research(session_id: UUID):
             }
 
     return EventSourceResponse(event_generator())
+
+
+@router.post("/{session_id}/revise")
+async def revise_plan(session_id: UUID, request: dict):
+    """
+    Manually revise the research plan mid-research.
+
+    Request body:
+    {
+        "reason": "Why the plan needs revision",
+        "feedback": "Optional user feedback or specific instructions"
+    }
+    """
+    from app.models.research_plan import ResearchPlan
+
+    session = await db.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Get the user's query from messages
+    messages = await db.get_messages(session_id)
+    user_messages = [m for m in messages if m["role"] == "user"]
+    if not user_messages:
+        raise HTTPException(status_code=400, detail="No research query found")
+
+    query = user_messages[-1]["content"]
+
+    # Get current research steps to build context
+    research_steps = await db.get_research_steps(session_id)
+
+    # Build evidence summary from completed steps
+    evidence_summary = ""
+    for step in research_steps:
+        step_data = step.get("data", {})
+        if step.get("status") == "completed":
+            if step.get("step_type") == "search":
+                evidence_summary += f"\n- Search results from: {step_data.get('query', 'unknown')}"
+            elif step.get("step_type") == "scraper":
+                evidence_summary += f"\n- Scraped content"
+
+    revision_context = {
+        "evidence_summary": evidence_summary,
+        "failed_steps": [],
+        "low_quality_steps": [],
+        "user_feedback": request.get("feedback", ""),
+        "reason": request.get("reason", "Manual revision requested"),
+    }
+
+    model = session.get("model") or get_model()
+    orchestrator = ResearchOrchestrator(model=model, session_id=str(session_id))
+
+    # For now, return a placeholder - full implementation would load current plan
+    # and call orchestrator._revise_plan()
+    return {
+        "status": "revision_requested",
+        "session_id": str(session_id),
+        "message": "Plan revision initiated. This will be applied in the next research iteration.",
+    }

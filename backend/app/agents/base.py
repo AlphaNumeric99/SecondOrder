@@ -6,7 +6,6 @@ from typing import Any, AsyncGenerator
 from app.llm_client import client as llm_client, get_model
 from app.models.events import SSEEvent
 from app.services import logger as log_service
-from app.services import supabase as db
 from app.services.prompt_store import render_prompt
 
 
@@ -77,6 +76,7 @@ class BaseAgent:
             # Log the LLM call
             try:
                 from uuid import UUID
+                from app.services import database as db
 
                 usage = response.usage
                 await db.log_llm_call(
