@@ -40,15 +40,12 @@ BUGS.md
 # Misc
 *.log
 *.tmp
-tmp_query_result*.json
-tmp_latest_query_run*.json
-backend/tmp_query_result*.json
-backend/tmp_latest_query_run*.json
+tmp_*.json
 *.sh
 *.bat
-backend/.cache/
+.cache/
 
 # Codex workspace
 .codex/
 .cache/*
-backend/trace_runs/*
+trace_runs/*

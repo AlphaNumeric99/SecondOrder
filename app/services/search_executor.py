@@ -5,6 +5,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from loguru import logger
+
 from app.models.events import SSEEvent
 from app.services import streaming
 from app.tools import search_provider, web_utils
@@ -205,11 +207,13 @@ async def run_deterministic_searches(
     max_results_per_query: int,
 ) -> tuple[list[dict[str, Any]], list[SSEEvent]]:
     """Run deterministic web searches for each step with bounded parallelism."""
+    logger.info(f"Starting deterministic searches for {len(plan_steps)} steps (max_parallel={max_parallel})")
     events: list[SSEEvent] = []
     all_results: list[dict[str, Any]] = []
     semaphore = asyncio.Semaphore(max(max_parallel, 1))
 
     for index, step in enumerate(plan_steps):
+        logger.debug(f"Search step {step_offset + index}: {step[:80]}...")
         events.append(streaming.agent_started("search", step=step_offset + index, query=step))
 
     async def run_step(step: str, index: int) -> StepSearchResult:
@@ -283,4 +287,5 @@ async def run_deterministic_searches(
             )
         )
 
+    logger.info(f"Deterministic searches completed: {len(all_results)} total results")
     return all_results, events

@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any, AsyncGenerator
 from uuid import UUID
 
+from loguru import logger
+
 from app.research_core.evidence.repository import EvidenceRepository
 from app.research_core.extract.service import ExtractService
 from app.research_core.models.interfaces import ScrapeRequest
@@ -2475,6 +2477,7 @@ class ResearchOrchestrator:
             notes,
         )
 
+        logger.info(f"Starting synthesis stage with {len(search_results)} search results and {len(scraped_content)} scraped pages")
         yield streaming.synthesis_started(len(search_results))
 
         # Use streaming for the synthesis to get incremental output
@@ -2518,6 +2521,7 @@ class ResearchOrchestrator:
         if pipeline_started_at is not None:
             runtime_ms = int((time.monotonic() - pipeline_started_at) * 1000)
 
+        logger.info(f"Research complete! Runtime: {runtime_ms}ms, Tokens: {tokens_used}, Sources: {len(sources)}")
         yield streaming.research_complete(
             report=full_report,
             sources=sources[:20],
@@ -2670,9 +2674,15 @@ Respond with ONLY valid JSON in this format:
 
     async def _execute_research(self, query: str) -> AsyncGenerator[SSEEvent, None]:
         """Hybrid execution: staged backbone with bounded parallel mesh internals."""
+        logger.info(f"Starting research execution for query: {query[:100]}...")
         try:
             pipeline_started_at = time.monotonic()
+
+            # Generate research plan
+            logger.info("Generating research plan...")
             research_plan = await self._generate_plan(query)
+            logger.info(f"Research plan generated with {len(research_plan.steps)} steps")
+            logger.debug(f"Research plan: {research_plan.model_dump_json()}")
             yield streaming.plan_created(research_plan)
 
             # Extract steps as list for methods that expect list[str]
@@ -2684,9 +2694,11 @@ Respond with ONLY valid JSON in this format:
                 "mode": "hybrid",
                 "shadow_mode": self.shadow_mode,
             }
+            logger.info(f"Execution graph compiled: {graph_meta}")
             yield streaming.execution_compiled(graph_meta)
 
             # Stage: search
+            logger.info("Starting search stage...")
             search_stage_started = time.monotonic()
             yield streaming.mesh_stage_started(
                 "search",
@@ -2722,6 +2734,7 @@ Respond with ONLY valid JSON in this format:
                         self._merge_search_results(search_results, bootstrap_results)
                     )
 
+            logger.info(f"Search stage completed: {len(search_results)} results from {len(plan_step_queries)} queries")
             yield streaming.mesh_stage_completed(
                 "search",
                 results_count=len(search_results),
@@ -2736,7 +2749,9 @@ Respond with ONLY valid JSON in this format:
             search_step_offset = len(plan_step_queries) + bootstrap_query_count
 
             # Stage: extraction
+            logger.info(f"Starting extraction stage with {len(search_results)} search results")
             top_urls = await self._select_top_urls(search_results, query=query)
+            logger.info(f"Selected {len(top_urls)} top URLs for extraction")
             if bootstrap_results:
                 bootstrap_top_urls = await self._select_top_urls(
                     bootstrap_results,
@@ -3053,6 +3068,7 @@ Respond with ONLY valid JSON in this format:
             ):
                 yield event
         except Exception as e:
+            logger.exception(f"Research failed with error: {e}")
             yield streaming.error(f"Hybrid research failed: {e}")
 
     async def research(self, query: str) -> AsyncGenerator[SSEEvent, None]:

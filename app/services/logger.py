@@ -1,30 +1,42 @@
-"""Centralized logging service for debugging and monitoring."""
-import json
-import logging
+"""Centralized logging service using loguru."""
+
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from loguru import logger
+
 from app.config import settings
 
-# Create logs directory
+# Configure loguru
 LOG_DIR = Path("logs")
 LOG_DIR.mkdir(exist_ok=True)
 
-APP_LOG_LEVEL = getattr(logging, settings.app_log_level.upper(), logging.INFO)
-NOISY_LOG_LEVEL = getattr(logging, settings.noisy_log_level.upper(), logging.WARNING)
+# Remove default handler
+logger.remove()
 
-# Configure logging
-logging.basicConfig(
-    level=APP_LOG_LEVEL,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_DIR / "secondorder.log"),
-        logging.StreamHandler(),  # Also print to console
-    ],
+# Add console handler with color
+logger.add(
+    sys.stderr,
+    format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+    level=settings.app_log_level.upper(),
+    colorize=True,
 )
 
-# Reduce noise from framework/network libraries unless explicitly overridden.
+# Add file handler
+logger.add(
+    LOG_DIR / "secondorder_{time:YYYY-MM-DD}.log",
+    format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
+    level="DEBUG",
+    rotation="00:00",  # New file at midnight
+    retention="7 days",  # Keep logs for 7 days
+    compression="zip",
+)
+
+# Reduce noise from framework/network libraries
+import logging
+
 for logger_name in (
     "uvicorn",
     "uvicorn.error",
@@ -37,9 +49,7 @@ for logger_name in (
     "openai._base_client",
     "asyncio",
 ):
-    logging.getLogger(logger_name).setLevel(NOISY_LOG_LEVEL)
-
-logger = logging.getLogger("secondorder")
+    logging.getLogger(logger_name).setLevel(settings.noisy_log_level.upper())
 
 
 def log_llm_call(
@@ -63,7 +73,10 @@ def log_llm_call(
         "status": status,
         "error": error,
     }
-    logger.info(f"LLM_CALL: {json.dumps(call_data)}")
+    if error:
+        logger.error(f"LLM_CALL_FAILED: {call_data}")
+    else:
+        logger.info(f"LLM_CALL: {call_data}")
 
 
 def log_research_step(
@@ -80,7 +93,7 @@ def log_research_step(
         "status": status,
         "data": data,
     }
-    logger.info(f"RESEARCH_STEP: {json.dumps(step_data)}")
+    logger.info(f"RESEARCH_STEP: {step_data}")
 
 
 def log_db_operation(
@@ -99,7 +112,10 @@ def log_db_operation(
         "details": details,
         "error": error,
     }
-    logger.info(f"DB_OPERATION: {json.dumps(op_data)}")
+    if error:
+        logger.error(f"DB_OPERATION_FAILED: {op_data}")
+    else:
+        logger.info(f"DB_OPERATION: {op_data}")
 
 
 def log_event(
@@ -114,4 +130,4 @@ def log_event(
         "message": message,
         **kwargs,
     }
-    logger.info(f"EVENT: {json.dumps(event_data)}")
+    logger.info(f"EVENT: {event_data}")
