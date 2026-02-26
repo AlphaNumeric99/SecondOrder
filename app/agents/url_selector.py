@@ -152,9 +152,6 @@ class URLSelector:
                     if query_year in title or query_year in snippet:
                         rank_score += 0.5
 
-                # Boost for "best-of" category pages that match query context
-                # Generic noise suppression
-                lowered_url = url_lower
                 if "/list_of_" in lowered_url and token_overlap <= 2:
                     rank_score -= 1.0
                 if "/list_of_people_" in lowered_url:
