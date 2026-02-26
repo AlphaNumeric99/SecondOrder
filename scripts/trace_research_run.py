@@ -4,11 +4,15 @@ import argparse
 import asyncio
 import json
 import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 from typing import Any
 from urllib.parse import urlparse
+
+# Add parent to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.agents.orchestrator import ResearchOrchestrator
 from app.llm_client import client as llm_client

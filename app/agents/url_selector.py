@@ -348,7 +348,7 @@ class URLSelector:
         # Match sequences of words starting with capital letters
         # but allowing for parentheses, colons, etc.
         title_pattern = re.compile(
-            r'(?:^|[\s\-/:(])\K[A-Z][a-zA-Z]*(?:\s+[A-Z][a-zA-Z]*)*'
+            r'(?:^|[\s\-/:(])([A-Z][a-zA-Z]*(?:\s+[A-Z][a-zA-Z]*)*)'
         )
         matches = title_pattern.findall(text)
 

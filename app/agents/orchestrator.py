@@ -2683,6 +2683,18 @@ Respond with ONLY valid JSON in this format:
             research_plan = await self._generate_plan(query)
             logger.info(f"Research plan generated with {len(research_plan.steps)} steps")
             logger.debug(f"Research plan: {research_plan.model_dump_json()}")
+
+            # Save plan to database
+            if self.session_id:
+                try:
+                    from uuid import UUID
+                    await db.save_research_plan(
+                        UUID(self.session_id),
+                        research_plan.model_dump(),
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to save research plan: {e}")
+
             yield streaming.plan_created(research_plan)
 
             # Extract steps as list for methods that expect list[str]

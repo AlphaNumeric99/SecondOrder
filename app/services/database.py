@@ -251,6 +251,65 @@ async def get_research_steps(session_id: UUID) -> list[dict[str, Any]]:
         return rows
 
 
+async def save_research_plan(session_id: UUID, plan: dict) -> dict[str, Any]:
+    """Save or update the research plan for a session."""
+    pool = await _get_pool()
+    async with pool.acquire() as conn:
+        # Check if plan already exists
+        existing = await conn.fetchrow(
+            """
+            SELECT id FROM research_steps
+            WHERE session_id = $1 AND step_type = 'plan'
+            """,
+            session_id,
+        )
+        if existing:
+            # Update existing plan
+            result = await conn.fetchrow(
+                """
+                UPDATE research_steps
+                SET data = $1, status = 'completed'
+                WHERE session_id = $2 AND step_type = 'plan'
+                RETURNING id, session_id, step_type, status, data, created_at
+                """,
+                json.dumps(plan),
+                session_id,
+            )
+        else:
+            # Create new plan
+            result = await conn.fetchrow(
+                """
+                INSERT INTO research_steps (session_id, step_type, data, status)
+                VALUES ($1, 'plan', $2, 'completed')
+                RETURNING id, session_id, step_type, status, data, created_at
+                """,
+                session_id,
+                json.dumps(plan),
+            )
+        row = dict(result)
+        row["data"] = _coerce_json_object(row.get("data"))
+        return row
+
+
+async def get_research_plan(session_id: UUID) -> dict | None:
+    """Get the research plan for a session."""
+    pool = await _get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.fetchrow(
+            """
+            SELECT id, session_id, step_type, status, data, created_at
+            FROM research_steps
+            WHERE session_id = $1 AND step_type = 'plan'
+            """,
+            session_id,
+        )
+        if not result:
+            return None
+        row = dict(result)
+        row["data"] = _coerce_json_object(row.get("data"))
+        return row
+
+
 # --- LLM Calls ---
 
 async def log_llm_call(
