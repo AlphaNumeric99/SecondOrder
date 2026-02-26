@@ -5,7 +5,36 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from rank_bm25 import BM25Okapi
+
 from app.tools import web_utils
+
+
+def _compute_bm25_scores(query: str, documents: list[str]) -> list[float]:
+    """
+    Compute BM25 scores using rank-bm25 library.
+
+    Returns normalized scores (0-1 range).
+    """
+    if not documents:
+        return []
+
+    # Tokenize documents
+    tokenized_docs = [doc.lower().split() for doc in documents]
+
+    # Create BM25 index
+    bm25 = BM25Okapi(tokenized_docs)
+
+    # Get scores for query - convert numpy array to list
+    scores = bm25.get_scores(query.lower().split())
+    scores = [float(s) for s in scores]  # Convert to Python floats
+
+    # Normalize to 0-1 range
+    max_score = max(scores) if scores else 1
+    if max_score > 0:
+        scores = [s / max_score for s in scores]
+
+    return scores
 
 
 class URLSelector:
@@ -46,14 +75,25 @@ class URLSelector:
         is_chain = self._is_chain_like_query(query)
         entity_hints = self._derive_entity_hints(search_results) if is_chain else []
 
+        # Extract year from query for special handling
+        query_year = self._extract_year_from_query(query)
+
         # Relation-aware retrieval for chain queries
         chain_components = self._extract_chain_components(query) if is_chain else {}
         primary_entity = chain_components.get("primary", "")
 
+        # Pre-compute BM25 scores for all documents
+        # Combine title + snippet for BM25 scoring
+        doc_texts = [
+            f"{r.get('title', '')} {r.get('content', '')}"
+            for r in search_results
+        ]
+        bm25_scores = _compute_bm25_scores(query, doc_texts)
+
         # Deduplicate by URL, keep highest rank score.
         ranked_by_url: dict[str, float] = {}
         overlap_by_url: dict[str, int] = {}
-        for r in search_results:
+        for idx, r in enumerate(search_results):
             url = r.get("url", "")
             raw_score = r.get("score", 0.0)
             try:
@@ -92,13 +132,27 @@ class URLSelector:
                         1 for hint in entity_hints if hint in title or hint in url_lower or hint in snippet
                     )
 
+                # Get BM25 score for this document
+                bm25_score = bm25_scores[idx] if idx < len(bm25_scores) else 0.0
+
                 rank_score = (
                     base_score
                     + (token_overlap * 0.24)
                     + (phrase_overlap * 0.75)
                     + (entity_overlap * 0.35)
+                    + (bm25_score * 0.5)  # BM25 contribution
                 )
 
+                # Year-based boost: if query contains a specific year, prioritize URLs with that year
+                if query_year:
+                    url_year_match = f"/{query_year}/" in lowered_url or f"_{query_year}" in lowered_url
+                    if url_year_match:
+                        rank_score += 1.5  # Strong boost for year match
+                    # Also check if title or snippet mentions the year
+                    if query_year in title or query_year in snippet:
+                        rank_score += 0.5
+
+                # Boost for "best-of" category pages that match query context
                 # Generic noise suppression
                 lowered_url = url_lower
                 if "/list_of_" in lowered_url and token_overlap <= 2:
