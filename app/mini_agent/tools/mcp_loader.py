@@ -179,13 +179,13 @@ class MCPServerConnection:
 
             conn_info = self.url if self.url else self.command
             print(
-                f"✓ Connected to MCP server '{self.name}' ({self.connection_type}: {conn_info}) - loaded {len(self.tools)} tools"
+                f"[OK] Connected to MCP server '{self.name}' ({self.connection_type}: {conn_info}) - loaded {len(self.tools)} tools"
             )
             return True
 
         except TimeoutError:
             print(
-                f"✗ Connection to MCP server '{self.name}' timed out after {connect_timeout}s"
+                f"[X] Connection to MCP server '{self.name}' timed out after {connect_timeout}s"
             )
             if self.exit_stack:
                 await self.exit_stack.aclose()
@@ -193,7 +193,7 @@ class MCPServerConnection:
             return False
 
         except Exception as e:
-            print(f"✗ Failed to connect to MCP server '{self.name}': {e}")
+            print(f"[X] Failed to connect to MCP server '{self.name}': {e}")
             if self.exit_stack:
                 await self.exit_stack.aclose()
                 self.exit_stack = None
