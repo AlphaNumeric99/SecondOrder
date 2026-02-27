@@ -110,7 +110,7 @@ class DeepSearchQABenchmark(Benchmark):
         answer_type = task.metadata.get("answer_type", "Set Answer")
 
         judge_response = await client.messages.create(
-            model=settings.benchmark_judge_model,
+            model=settings.default_model,
             max_tokens=2048,
             system=JUDGE_SYSTEM,
             messages=[{

@@ -23,6 +23,7 @@ class EventType(str, Enum):
     SYNTHESIS_STARTED = "synthesis_started"
     SYNTHESIS_PROGRESS = "synthesis_progress"
     RESEARCH_COMPLETE = "research_complete"
+    MESSAGE = "message"
     ERROR = "error"
 
 

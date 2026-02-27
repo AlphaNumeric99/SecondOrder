@@ -62,7 +62,6 @@ SecondOrder is OpenRouter-only. Configure your key and default model:
 # backend/.env
 OPENROUTER_API_KEY=sk-or-...
 DEFAULT_MODEL=openai/gpt-4o-mini
-OPENROUTER_MODEL=                     # optional per-env override
 JINA_API_KEY=jina_...                 # Jina AI API key
 SEARCH_PROVIDER=jina                  # jina
 ```

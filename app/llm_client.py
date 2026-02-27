@@ -299,8 +299,8 @@ def get_client() -> OpenRouterClientAdapter:
 
 def get_model() -> str:
     """Get the active OpenRouter model id."""
-    if settings.openrouter_model:
-        return settings.openrouter_model
+    if settings.default_model:
+        return settings.default_model
     return settings.default_model
 
 

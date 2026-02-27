@@ -14,14 +14,12 @@ class TestGetModel:
 
     def test_get_model_returns_default_when_no_override(self):
         with patch("app.llm_client.settings") as mock_settings:
-            mock_settings.openrouter_model = ""
             mock_settings.default_model = "openai/gpt-4o-mini"
 
             assert get_model() == "openai/gpt-4o-mini"
 
     def test_get_model_returns_openrouter_override(self):
         with patch("app.llm_client.settings") as mock_settings:
-            mock_settings.openrouter_model = "openai/gpt-4.1"
             mock_settings.default_model = "openai/gpt-4o-mini"
 
             assert get_model() == "openai/gpt-4.1"
@@ -36,7 +34,6 @@ class TestGetModel:
 
         for model_id in model_ids:
             with patch("app.llm_client.settings") as mock_settings:
-                mock_settings.openrouter_model = model_id
                 mock_settings.default_model = "openai/gpt-4o-mini"
                 assert get_model() == model_id
 

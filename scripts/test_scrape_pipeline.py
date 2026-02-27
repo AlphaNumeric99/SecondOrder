@@ -22,12 +22,6 @@ def _ensure_min_env() -> None:
     defaults = {
         "OPENROUTER_API_KEY": "debug-placeholder",
         "DEFAULT_MODEL": "debug-model",
-        "OPENROUTER_MODEL": "debug-model",
-        "BENCHMARK_JUDGE_MODEL": "debug-model",
-        "TAVILY_API_KEY": "debug-placeholder",
-        "HASDATA_API_KEY": "debug-placeholder",
-        "SUPABASE_URL": "https://debug.local",
-        "SUPABASE_ANON_KEY": "debug-placeholder",
     }
     for key, value in defaults.items():
         os.environ.setdefault(key, value)

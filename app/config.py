@@ -6,9 +6,6 @@ class Settings(BaseSettings):
     openrouter_api_key: str
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     default_model: str
-    openrouter_model: str
-    planner_model: str = ""  # optional override for plan generation only
-    benchmark_judge_model: str
 
     # Search provider
     search_provider: str = "jina"  # jina

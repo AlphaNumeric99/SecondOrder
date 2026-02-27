@@ -46,7 +46,9 @@ def mesh_stage_started(stage: str, **kwargs: Any) -> SSEEvent:
 
 
 def mesh_stage_completed(stage: str, **kwargs: Any) -> SSEEvent:
-    return SSEEvent(event=EventType.MESH_STAGE_COMPLETED, data={"stage": stage, **kwargs})
+    return SSEEvent(
+        event=EventType.MESH_STAGE_COMPLETED, data={"stage": stage, **kwargs}
+    )
 
 
 def memory_upserted(**kwargs: Any) -> SSEEvent:
@@ -103,7 +105,9 @@ def scrape_result(url: str, content_preview: str) -> SSEEvent:
 
 
 def synthesis_started(sources_count: int) -> SSEEvent:
-    return SSEEvent(event=EventType.SYNTHESIS_STARTED, data={"sources_count": sources_count})
+    return SSEEvent(
+        event=EventType.SYNTHESIS_STARTED, data={"sources_count": sources_count}
+    )
 
 
 def synthesis_progress(chunk: str) -> SSEEvent:
@@ -131,3 +135,10 @@ def error(message: str, agent: str | None = None) -> SSEEvent:
     if agent:
         data["agent"] = agent
     return SSEEvent(event=EventType.ERROR, data=data)
+
+
+def message(content: str, msg_type: str = "info") -> SSEEvent:
+    """Emit a generic message event."""
+    return SSEEvent(
+        event=EventType.MESSAGE, data={"content": content, "type": msg_type}
+    )

@@ -108,7 +108,7 @@ class ResearchRubricsBenchmark(Benchmark):
         rubric_text = json.dumps(rubrics, indent=2)[:6000]
 
         judge_response = await client.messages.create(
-            model=settings.benchmark_judge_model,
+            model=settings.default_model,
             max_tokens=4096,
             system=JUDGE_SYSTEM,
             messages=[{

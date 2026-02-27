@@ -103,29 +103,35 @@ class LLMClient:
         return result
 
     def _to_openai_tools(self, tools: list) -> list[dict[str, Any]]:
-        return [
-            {
-                "type": "function",
-                "function": {
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.parameters,
-                },
-            }
-            for t in tools
-        ]
+        result = []
+        for t in tools:
+            if hasattr(t, "to_openai_schema"):
+                result.append(t.to_openai_schema())
+            else:
+                result.append(
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": t.name,
+                            "description": t.description,
+                            "parameters": t.parameters,
+                        },
+                    }
+                )
+        return result
 
     def _from_openai_response(self, response: Any) -> LLMResponse:
-        choice = response.choices[0].message
+        choice = response.choices[0]
+        message = choice.message
         content = ""
         tool_calls: list[ToolCall] | None = None
 
-        if choice.content:
-            content = choice.content
+        if message.content:
+            content = message.content
 
-        if getattr(choice, "tool_calls", None):
+        if getattr(message, "tool_calls", None):
             tool_calls = []
-            for tc in choice.tool_calls:
+            for tc in message.tool_calls:
                 args = json.loads(tc.function.arguments or "{}")
                 tool_calls.append(
                     ToolCall(

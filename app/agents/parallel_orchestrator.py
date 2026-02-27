@@ -39,7 +39,7 @@ class ParallelAgentOrchestrator:
         model: str | None = None,
         session_id: str | None = None,
         workspace_dir: str = "./workspace",
-        max_steps_per_agent: int = 50,
+        max_steps_per_agent: int = 100,
         mcp_config_path: str | None = None,
     ):
         self.model = model or get_model()
