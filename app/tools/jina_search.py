@@ -12,6 +12,7 @@ from app.config import settings
 @dataclass
 class SearchResult:
     """Normalized search result from Jina AI search."""
+
     title: str
     url: str
     content: str
@@ -33,7 +34,9 @@ def _parse_jina_search_response(text: str, max_results: int = 10) -> list[Search
 
     # Split by result blocks (e.g., [1], [2], etc.)
     # Pattern matches [N] followed by field
-    result_pattern = re.compile(r'\[(\d+)\]\s+(Title|URL Source|Description):\s*(.*?)(?=\[\d+\]|$)', re.DOTALL)
+    result_pattern = re.compile(
+        r"\[(\d+)\]\s+(Title|URL Source|Description):\s*(.*?)(?=\[\d+\]|$)", re.DOTALL
+    )
 
     matches = result_pattern.findall(text)
 
@@ -47,12 +50,14 @@ def _parse_jina_search_response(text: str, max_results: int = 10) -> list[Search
         if index != current_index:
             # New result block
             if current_result and current_index > 0:
-                results.append(SearchResult(
-                    title=current_result.get("Title", ""),
-                    url=current_result.get("URL Source", ""),
-                    content=current_result.get("Description", ""),
-                    score=0.0,
-                ))
+                results.append(
+                    SearchResult(
+                        title=current_result.get("Title", ""),
+                        url=current_result.get("URL Source", ""),
+                        content=current_result.get("Description", ""),
+                        score=0.0,
+                    )
+                )
                 if len(results) >= max_results:
                     break
             current_result = {}
@@ -62,12 +67,14 @@ def _parse_jina_search_response(text: str, max_results: int = 10) -> list[Search
 
     # Don't forget the last result
     if current_result and current_index > 0:
-        results.append(SearchResult(
-            title=current_result.get("Title", ""),
-            url=current_result.get("URL Source", ""),
-            content=current_result.get("Description", ""),
-            score=0.0,
-        ))
+        results.append(
+            SearchResult(
+                title=current_result.get("Title", ""),
+                url=current_result.get("URL Source", ""),
+                content=current_result.get("Description", ""),
+                score=0.0,
+            )
+        )
 
     return results[:max_results]
 
@@ -100,15 +107,20 @@ async def search(
     url = f"https://s.jina.ai/?q={encoded_query}"
 
     async with httpx.AsyncClient() as client:
-        response = await client.get(
-            url,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "X-Respond-With": "no-content",
-            },
-            timeout=30.0,
-        )
-        response.raise_for_status()
+        try:
+            response = await client.get(
+                url,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "X-Respond-With": "no-content",
+                },
+                timeout=30.0,
+            )
+            if response.status_code == 422:
+                return []
+            response.raise_for_status()
+        except httpx.HTTPStatusError:
+            return []
 
         # Jina search returns plain text, not JSON
         text = response.text

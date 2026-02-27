@@ -29,7 +29,9 @@ def _normalize_step_text(step: str) -> str:
 
     # Planner models occasionally emit prose such as:
     # "Search X ... — query: site:example.com ..."
-    query_match = re.search(r"\b(?:search\s+)?query\s*[:\-]\s*(.+)$", cleaned, flags=re.IGNORECASE)
+    query_match = re.search(
+        r"\b(?:search\s+)?query\s*[:\-]\s*(.+)$", cleaned, flags=re.IGNORECASE
+    )
     if query_match:
         cleaned = query_match.group(1).strip()
 
@@ -70,14 +72,20 @@ def _normalize_step_text(step: str) -> str:
                 cleaned,
                 flags=re.IGNORECASE,
             )
-            without_site = re.sub(r"\bsource\s*:\s*", "", without_site, flags=re.IGNORECASE)
+            without_site = re.sub(
+                r"\bsource\s*:\s*", "", without_site, flags=re.IGNORECASE
+            )
             without_site = " ".join(without_site.split()).strip(" -—:;,.()")
-            cleaned = f"{without_site} {primary_site}".strip() if without_site else primary_site
+            cleaned = (
+                f"{without_site} {primary_site}".strip()
+                if without_site
+                else primary_site
+            )
 
     # Remove unresolved placeholders from planner output.
     cleaned = re.sub(r"\[[^\]]+\]", "", cleaned)
     cleaned = re.sub(r"\(\s*\)", "", cleaned)
-    cleaned = re.sub(r'"\s*"', "", cleaned)
+    cleaned = re.sub(r'""', "", cleaned)
     cleaned = " ".join(cleaned.split()).strip()
     return cleaned
 
@@ -207,14 +215,18 @@ async def run_deterministic_searches(
     max_results_per_query: int,
 ) -> tuple[list[dict[str, Any]], list[SSEEvent]]:
     """Run deterministic web searches for each step with bounded parallelism."""
-    logger.info(f"Starting deterministic searches for {len(plan_steps)} steps (max_parallel={max_parallel})")
+    logger.info(
+        f"Starting deterministic searches for {len(plan_steps)} steps (max_parallel={max_parallel})"
+    )
     events: list[SSEEvent] = []
     all_results: list[dict[str, Any]] = []
     semaphore = asyncio.Semaphore(max(max_parallel, 1))
 
     for index, step in enumerate(plan_steps):
         logger.debug(f"Search step {step_offset + index}: {step[:80]}...")
-        events.append(streaming.agent_started("search", step=step_offset + index, query=step))
+        events.append(
+            streaming.agent_started("search", step=step_offset + index, query=step)
+        )
 
     async def run_step(step: str, index: int) -> StepSearchResult:
         step_result = StepSearchResult(step_index=step_offset + index)
@@ -263,7 +275,9 @@ async def run_deterministic_searches(
         step_index = step_offset + index
         if isinstance(item, Exception):
             events.append(streaming.error(str(item), agent="search"))
-            events.append(streaming.agent_completed("search", step=step_index, success=False))
+            events.append(
+                streaming.agent_completed("search", step=step_index, success=False)
+            )
             continue
 
         all_results.extend(item.results)

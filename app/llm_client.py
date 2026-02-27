@@ -1,4 +1,5 @@
 """OpenRouter-only LLM client factory with legacy message adapter methods."""
+
 from __future__ import annotations
 
 import json
@@ -41,6 +42,7 @@ class OpenRouterStream:
         self._stream: Any | None = None
         self._usage = Usage()
         self._finished = False
+        self._full_text: str = ""
 
     async def __aenter__(self) -> "OpenRouterStream":
         self._stream = await self._stream_coro
@@ -67,8 +69,12 @@ class OpenRouterStream:
             delta = getattr(choices[0], "delta", None)
             if not delta:
                 continue
+            # Some models (e.g., Qwen3) put reasoning in reasoning_content
             text = getattr(delta, "content", None)
+            if not text:
+                text = getattr(delta, "reasoning_content", None)
             if text:
+                self._full_text += text
                 yield text
         self._finished = True
 
@@ -80,7 +86,10 @@ class OpenRouterStream:
         if not self._finished:
             async for _ in self.text_stream:
                 pass
-        return MessageResponse(content=[], usage=self._usage)
+        content = []
+        if self._full_text:
+            content.append(TextBlock(type="text", text=self._full_text))
+        return MessageResponse(content=content, usage=self._usage)
 
 
 class OpenRouterMessagesAdapter:
@@ -95,7 +104,9 @@ class OpenRouterMessagesAdapter:
             return 1
         return 0
 
-    def _to_openai_messages(self, system: str, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _to_openai_messages(
+        self, system: str, messages: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
         openai_messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
 
         for message in messages:
@@ -110,20 +121,43 @@ class OpenRouterMessagesAdapter:
                 text_parts: list[str] = []
                 tool_calls: list[dict[str, Any]] = []
                 for block in content:
-                    btype = getattr(block, "type", None) if not isinstance(block, dict) else block.get("type")
+                    btype = (
+                        getattr(block, "type", None)
+                        if not isinstance(block, dict)
+                        else block.get("type")
+                    )
                     if btype == "text":
-                        text_value = getattr(block, "text", None) if not isinstance(block, dict) else block.get("text")
+                        text_value = (
+                            getattr(block, "text", None)
+                            if not isinstance(block, dict)
+                            else block.get("text")
+                        )
                         if text_value:
                             text_parts.append(text_value)
                     elif btype == "tool_use":
-                        bid = getattr(block, "id", None) if not isinstance(block, dict) else block.get("id")
-                        bname = getattr(block, "name", None) if not isinstance(block, dict) else block.get("name")
-                        binput = getattr(block, "input", None) if not isinstance(block, dict) else block.get("input")
+                        bid = (
+                            getattr(block, "id", None)
+                            if not isinstance(block, dict)
+                            else block.get("id")
+                        )
+                        bname = (
+                            getattr(block, "name", None)
+                            if not isinstance(block, dict)
+                            else block.get("name")
+                        )
+                        binput = (
+                            getattr(block, "input", None)
+                            if not isinstance(block, dict)
+                            else block.get("input")
+                        )
                         tool_calls.append(
                             {
                                 "id": bid,
                                 "type": "function",
-                                "function": {"name": bname, "arguments": json.dumps(binput or {})},
+                                "function": {
+                                    "name": bname,
+                                    "arguments": json.dumps(binput or {}),
+                                },
                             }
                         )
                 msg: dict[str, Any] = {"role": "assistant"}
@@ -160,7 +194,9 @@ class OpenRouterMessagesAdapter:
                 "function": {
                     "name": t["name"],
                     "description": t.get("description", ""),
-                    "parameters": t.get("input_schema", {"type": "object", "properties": {}}),
+                    "parameters": t.get(
+                        "input_schema", {"type": "object", "properties": {}}
+                    ),
                 },
             }
             for t in tools
@@ -173,6 +209,9 @@ class OpenRouterMessagesAdapter:
         content: list[Any] = []
 
         text = getattr(choice, "content", None)
+        # Some models (e.g., Qwen3) put reasoning in reasoning_content
+        if not text:
+            text = getattr(choice, "reasoning_content", None)
         if text:
             content.append(TextBlock(type="text", text=text))
 
