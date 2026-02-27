@@ -23,7 +23,7 @@ async def run_research(
     )
 
     async for event in orchestrator.run(query):
-        event_type = event.event.value
+        event_type = event.event.value if hasattr(event.event, "value") else event.event
         data = event.data
 
         if event_type == "agent_started":
