@@ -74,7 +74,7 @@ def resolve_domain_policy(
 
 
 class ScrapeService:
-    """Headless-first scrape service with domain policy hooks and retries."""
+    """Scrape service using Jina AI Reader API."""
 
     def __init__(
         self,
@@ -83,19 +83,17 @@ class ScrapeService:
         retry_max: int = 1,
         fetcher: Fetcher | None = None,
         capture_screenshot: bool = False,
-        provider: str = "firecrawl",
-        firecrawl_base_url: str = "http://localhost:3002",
-        firecrawl_api_key: str = "",
-        jina_reader_base_url: str = "",
+        provider: str = "jina",
+        jina_api_key: str = "",
     ):
+        from app.config import settings
+
         self.artifacts_dir = Path(artifacts_dir)
         self.retry_max = max(int(retry_max), 0)
         self._fetcher = fetcher
         self.capture_screenshot = bool(capture_screenshot)
-        self.provider = provider.lower().strip() or "firecrawl"
-        self.firecrawl_base_url = firecrawl_base_url.strip()
-        self.firecrawl_api_key = firecrawl_api_key.strip()
-        self.jina_reader_base_url = jina_reader_base_url.strip()
+        self.provider = provider.lower().strip() or "jina"
+        self.jina_api_key = jina_api_key or settings.jina_api_key
         self._html_dir = self.artifacts_dir / "html"
         self._meta_dir = self.artifacts_dir / "metadata"
         self._html_dir.mkdir(parents=True, exist_ok=True)
@@ -167,135 +165,37 @@ class ScrapeService:
         policy: DomainPolicy,
         _attempt: int,
     ) -> FetchResult:
-        if request.render_mode == "http_only":
-            return await self._fetch_with_httpx(request, policy)
+        return await self._fetch_with_jina(request, policy)
 
-        attempts: list[Callable[[ScrapeRequest, DomainPolicy], Awaitable[FetchResult]]] = []
-        if self.provider in {"playwright", "auto"}:
-            attempts.append(self._fetch_with_playwright)
-        if self.provider in {"firecrawl", "auto"}:
-            attempts.append(self._fetch_with_firecrawl)
-        if self.provider in {"jina", "jina_reader", "auto"}:
-            attempts.append(self._fetch_with_jina_reader)
-        attempts.append(self._fetch_with_httpx)
-
-        last_error: Exception | None = None
-        for fetch_fn in attempts:
-            try:
-                return await fetch_fn(request, policy)
-            except Exception as exc:
-                last_error = exc
-                continue
-        raise RuntimeError(f"No scrape provider succeeded for {request.url}: {last_error}")
-
-    async def _fetch_with_httpx(
+    async def _fetch_with_jina(
         self,
         request: ScrapeRequest,
         policy: DomainPolicy,
     ) -> FetchResult:
-        timeout_seconds = max(policy.timeout_ms / 1000.0, 1.0)
-        async with httpx.AsyncClient(
-            timeout=timeout_seconds,
-            follow_redirects=True,
-        ) as client:
-            response = await client.get(
-                request.url,
-                headers={"User-Agent": "SecondOrderBot/2.0 (+https://example.local)"},
-            )
-            response.raise_for_status()
-            return response.text, str(response.url), int(response.status_code), None
+        """Fetch using Jina AI Reader API (https://r.jina.ai/<url>)."""
+        if not self.jina_api_key:
+            raise RuntimeError("Jina API key not configured. Set JINA_API_KEY in environment.")
 
-    async def _fetch_with_playwright(
-        self,
-        request: ScrapeRequest,
-        policy: DomainPolicy,
-    ) -> FetchResult:
-        try:
-            from playwright.async_api import async_playwright
-        except Exception as exc:  # pragma: no cover - depends on optional package
-            raise RuntimeError("Playwright is not installed") from exc
+        # Build the Jina Reader URL
+        target = f"https://r.jina.ai/{request.url}"
 
-        screenshot_path: str | None = None
-        async with async_playwright() as playwright:  # pragma: no cover - integration behavior
-            browser = await playwright.chromium.launch(headless=True)
-            context = await browser.new_context()
-            page = await context.new_page()
-            response = await page.goto(
-                request.url,
-                wait_until=policy.wait_until,
-                timeout=policy.timeout_ms,
-            )
-            html = await page.content()
-            final_url = page.url
-            status_code = int(response.status) if response is not None else 200
-
-            if self.capture_screenshot:
-                digest = hashlib.sha1(
-                    f"{request.url}|{final_url}|shot".encode("utf-8")
-                ).hexdigest()
-                shot_path = self.artifacts_dir / "screenshots" / f"{digest}.png"
-                shot_path.parent.mkdir(parents=True, exist_ok=True)
-                await page.screenshot(path=str(shot_path), full_page=True)
-                screenshot_path = str(shot_path)
-
-            await context.close()
-            await browser.close()
-            return html, final_url, status_code, screenshot_path
-
-    async def _fetch_with_firecrawl(
-        self,
-        request: ScrapeRequest,
-        policy: DomainPolicy,
-    ) -> FetchResult:
-        if not self.firecrawl_base_url:
-            raise RuntimeError("Firecrawl base URL not configured")
-
-        endpoint = self.firecrawl_base_url.rstrip("/") + "/v1/scrape"
-        headers = {"Content-Type": "application/json"}
-        if self.firecrawl_api_key:
-            headers["Authorization"] = f"Bearer {self.firecrawl_api_key}"
-
-        timeout_seconds = max(policy.timeout_ms / 1000.0, 1.0)
-        payload = {
-            "url": request.url,
-            "formats": ["html"],
+        headers = {
+            "Authorization": f"Bearer {self.jina_api_key}",
+            "X-Return-Format": "markdown",
         }
-        async with httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=True) as client:
-            response = await client.post(endpoint, json=payload, headers=headers)
-            response.raise_for_status()
-            data = response.json()
 
-        html = ""
-        final_url = request.url
-        if isinstance(data, dict):
-            body = data.get("data", data)
-            if isinstance(body, dict):
-                html = str(body.get("html") or body.get("content") or "")
-                metadata = body.get("metadata")
-                if isinstance(metadata, dict):
-                    final_url = str(metadata.get("sourceURL") or metadata.get("url") or final_url)
-        if not html:
-            raise RuntimeError("Firecrawl response missing html content")
-        return html, final_url, int(response.status_code), None
-
-    async def _fetch_with_jina_reader(
-        self,
-        request: ScrapeRequest,
-        policy: DomainPolicy,
-    ) -> FetchResult:
-        if not self.jina_reader_base_url:
-            raise RuntimeError("Jina reader base URL not configured")
-        base = self.jina_reader_base_url
-        if "{url}" in base:
-            target = base.format(url=request.url)
-        else:
-            target = base.rstrip("/") + "/" + request.url
+        # Enable JavaScript rendering if requested
+        if request.render_mode != "http_only":
+            headers["X-Engine"] = "cf-browser-rendering"
 
         timeout_seconds = max(policy.timeout_ms / 1000.0, 1.0)
         async with httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=True) as client:
-            response = await client.get(target)
+            response = await client.get(target, headers=headers)
             response.raise_for_status()
+
         text = response.text
         if not text:
-            raise RuntimeError("Jina reader returned empty body")
+            raise RuntimeError("Jina Reader returned empty body")
+
+        # Jina returns markdown content - we store it as text
         return text, request.url, int(response.status_code), None

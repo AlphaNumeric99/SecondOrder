@@ -10,8 +10,6 @@ def app():
     with patch("app.config.Settings") as mock_settings:
         mock_settings.return_value.cors_origin_list = ["http://localhost:3000"]
         mock_settings.return_value.openrouter_api_key = "test"
-        mock_settings.return_value.tavily_api_key = "test"
-        mock_settings.return_value.hasdata_api_key = "test"
         mock_settings.return_value.supabase_url = "https://test.supabase.co"
         mock_settings.return_value.supabase_anon_key = "test"
         mock_settings.return_value.default_model = "openai/gpt-4o-mini"

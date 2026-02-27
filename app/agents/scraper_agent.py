@@ -7,7 +7,7 @@ from app.config import settings
 from app.models.events import SSEEvent
 from app.services.prompt_store import render_prompt
 from app.services import streaming
-from app.tools import content_extractor, hasdata_scraper, web_utils
+from app.tools import content_extractor, jina_scraper, web_utils
 
 
 class ScraperAgent(BaseAgent):
@@ -60,10 +60,10 @@ class ScraperAgent(BaseAgent):
             ))
 
             try:
-                result = await hasdata_scraper.scrape(
+                # Use Jina AI for scraping
+                result = await jina_scraper.scrape(
                     url,
                     render_js=tool_input.get("render_js", False),
-                    output_format_override="html",
                 )
                 extracted = content_extractor.extract_main_content(
                     url,

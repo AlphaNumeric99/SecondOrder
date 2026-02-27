@@ -20,10 +20,10 @@ You ask a question
   [Orchestrator] — breaks query into 3-5 research angles
        |
        v
-  [Search Agents] — parallel web searches via Brave (with Tavily fallback)
+  [Search Agents] — parallel web searches via Jina AI
        |
        v
-  [Scraper Agents] — extracts full content from top sources via Hasdata
+  [Scraper Agents] — extracts full content from top sources via Jina AI Reader
        |
        v
   [Analyzer] — configured OpenRouter model synthesizes everything into a cited report
@@ -39,8 +39,8 @@ Every step streams progress to the UI — you see the plan form, searches execut
 - **Backend**: Python + FastAPI, raw asyncio orchestration with OpenRouter (OpenAI-compatible SDK client)
 - **Frontend**: Next.js 16, React 19, Tailwind CSS 4
 - **Database**: Supabase (PostgreSQL) for sessions, messages, research steps, and LLM call logging
-- **Search**: Brave Search API (primary) + Tavily (fallback)
-- **Scraping**: Hasdata API
+- **Search**: Jina AI Search
+- **Scraping**: Jina AI Reader
 - **Models**: OpenRouter model IDs (user-selectable, e.g., GPT, Gemini, Llama families)
 
 No agent frameworks. No LangChain. No LlamaIndex. Just Python, asyncio, and OpenRouter-compatible SDK calls.
@@ -51,7 +51,7 @@ No agent frameworks. No LangChain. No LlamaIndex. Just Python, asyncio, and Open
 
 - Python 3.11+ (with uv)
 - Node.js 18+
-- API keys: OpenRouter, Hasdata, and either Brave or Tavily
+- API keys: OpenRouter
 - Supabase project
 
 ### LLM Configuration (OpenRouter)
@@ -63,10 +63,8 @@ SecondOrder is OpenRouter-only. Configure your key and default model:
 OPENROUTER_API_KEY=sk-or-...
 DEFAULT_MODEL=openai/gpt-4o-mini
 OPENROUTER_MODEL=                     # optional per-env override
-SEARCH_PROVIDER=brave                 # brave or tavily
-BRAVE_API_KEY=...                     # required for brave
-SEARCH_FALLBACK_TO_TAVILY=true        # fallback if brave fails/returns empty
-TAVILY_API_KEY=...                    # required when fallback is enabled
+JINA_API_KEY=jina_...                 # Jina AI API key
+SEARCH_PROVIDER=jina                  # jina
 ```
 
 Available model examples:

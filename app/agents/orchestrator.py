@@ -119,9 +119,7 @@ class ResearchOrchestrator:
         self.scrape_pipeline_max_parallel = max(int(settings.scrape_pipeline_max_parallel), 1)
         self.scrape_retry_max = max(int(settings.scrape_retry_max), 0)
         self.scrape_provider = str(settings.scrape_provider).lower().strip()
-        self.firecrawl_base_url = str(settings.firecrawl_base_url).strip()
-        self.firecrawl_api_key = str(settings.firecrawl_api_key).strip()
-        self.jina_reader_base_url = str(settings.jina_reader_base_url).strip()
+        self.jina_api_key = str(settings.jina_api_key).strip()
         self._scrape_service: ScrapeService | None = None
         self._extract_service: ExtractService | None = None
         self._evidence_repository: EvidenceRepository | None = None
@@ -1543,9 +1541,7 @@ class ResearchOrchestrator:
             self._scrape_service = ScrapeService(
                 retry_max=self.scrape_retry_max,
                 provider=self.scrape_provider,
-                firecrawl_base_url=self.firecrawl_base_url,
-                firecrawl_api_key=self.firecrawl_api_key,
-                jina_reader_base_url=self.jina_reader_base_url,
+                jina_api_key=self.jina_api_key,
             )
         if self._extract_service is None:
             self._extract_service = ExtractService(

@@ -28,7 +28,7 @@ async def test_scrape_service_retries_then_succeeds(tmp_path: Path):
         attempts.append(attempt)
         if attempt == 1:
             raise RuntimeError("transient failure")
-        return "<html><body>final content</body></html>", request.url, 200, None
+        return "<html><body>final content</html>", request.url, 200, None
 
     service = ScrapeService(
         artifacts_dir=str(tmp_path / "scrape"),
@@ -42,53 +42,18 @@ async def test_scrape_service_retries_then_succeeds(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_auto_provider_falls_through_chain(monkeypatch):
-    service = ScrapeService(provider="auto")
+async def test_jina_provider_uses_jina_api(monkeypatch):
+    """Test that Jina provider calls the Jina API."""
+    service = ScrapeService(provider="jina", jina_api_key="test-key")
     req = ScrapeRequest(url="https://example.com")
     policy = resolve_domain_policy(req.url)
 
-    async def fail_playwright(*_args, **_kwargs):
-        raise RuntimeError("playwright down")
+    async def mock_jina(_request, _policy):
+        return "markdown content", req.url, 200, None
 
-    async def fail_firecrawl(*_args, **_kwargs):
-        raise RuntimeError("firecrawl down")
-
-    async def ok_jina(*_args, **_kwargs):
-        return "markdown body", req.url, 200, None
-
-    monkeypatch.setattr(service, "_fetch_with_playwright", fail_playwright)
-    monkeypatch.setattr(service, "_fetch_with_firecrawl", fail_firecrawl)
-    monkeypatch.setattr(service, "_fetch_with_jina_reader", ok_jina)
+    monkeypatch.setattr(service, "_fetch_with_jina", mock_jina)
 
     html, final_url, status, screenshot = await service._fetch_default(req, policy, 1)
-    assert html == "markdown body"
+    assert html == "markdown content"
     assert final_url == req.url
     assert status == 200
-    assert screenshot is None
-
-
-@pytest.mark.asyncio
-async def test_js_heavy_page_path_succeeds_with_headless_provider(monkeypatch, tmp_path: Path):
-    service = ScrapeService(
-        artifacts_dir=str(tmp_path / "scrape"),
-        provider="playwright",
-    )
-
-    async def fake_headless(_request, _policy):
-        return (
-            "<html><body><div id='app'>Rendered dynamic content from JS</div></body></html>",
-            "https://example.com/final",
-            200,
-            None,
-        )
-
-    async def fail_http(*_args, **_kwargs):
-        raise RuntimeError("http fallback should not be used")
-
-    monkeypatch.setattr(service, "_fetch_with_playwright", fake_headless)
-    monkeypatch.setattr(service, "_fetch_with_httpx", fail_http)
-
-    artifact = await service.scrape(ScrapeRequest(url="https://example.com/js"))
-    rendered = Path(artifact.rendered_html_path).read_text(encoding="utf-8")
-    assert "Rendered dynamic content from JS" in rendered
-    assert artifact.final_url == "https://example.com/final"

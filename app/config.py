@@ -10,20 +10,15 @@ class Settings(BaseSettings):
     planner_model: str = ""  # optional override for plan generation only
     benchmark_judge_model: str
 
-    # Tavily
-    tavily_api_key: str
-
     # Search provider
-    search_provider: str = "brave"  # brave | tavily
-    brave_api_key: str = ""
-    search_fallback_to_tavily: bool = True
+    search_provider: str = "jina"  # jina
+    jina_api_key: str = ""  # Jina AI API key
     search_executor_mode: str = "deterministic"  # deterministic | agent_loop
     search_max_queries_per_step: int = 3
     search_max_results_per_query: int = 8
     search_max_parallel_requests: int = 8
 
-    # Hasdata
-    hasdata_api_key: str
+    # Scrape cache
     scrape_cache_enabled: bool = False
     scrape_cache_dir: str = ".cache/scrape"
     scrape_cache_ttl_hours: int = 168
@@ -38,10 +33,7 @@ class Settings(BaseSettings):
     scrape_quality_threshold: float = 0.55
     scrape_pipeline_max_parallel: int = 4
     scrape_retry_max: int = 1
-    scrape_provider: str = "firecrawl"  # firecrawl | jina_reader | playwright | auto
-    firecrawl_base_url: str = "http://localhost:3002"  # self-hosted Firecrawl
-    firecrawl_api_key: str = ""  # optional for self-hosted deployments
-    jina_reader_base_url: str = ""  # optional fallback, keep empty for local-only
+    scrape_provider: str = "jina"  # jina (uses Jina Reader API)
 
     # Staged + bounded mesh execution
     shadow_mode: bool = True

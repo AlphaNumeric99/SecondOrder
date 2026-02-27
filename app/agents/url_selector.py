@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 
 from rank_bm25 import BM25Okapi
 
+from app.services.embeddings_local import LocalEmbeddingService
 from app.tools import web_utils
 
 
@@ -28,6 +30,67 @@ def _compute_bm25_scores(query: str, documents: list[str]) -> list[float]:
     # Get scores for query - convert numpy array to list
     scores = bm25.get_scores(query.lower().split())
     scores = [float(s) for s in scores]  # Convert to Python floats
+
+    # Normalize to 0-1 range
+    max_score = max(scores) if scores else 1
+    if max_score > 0:
+        scores = [s / max_score for s in scores]
+
+    return scores
+
+
+def _clean_url_for_scoring(url: str) -> str:
+    """Clean URL for scoring - extract domain and path, replace separators with spaces."""
+    if not url:
+        return ""
+    try:
+        from urllib.parse import urlparse
+    except ImportError:
+        return url
+
+    parsed = urlparse(url)
+    # Combine domain + path, remove params/fragments
+    domain = parsed.netloc or ""
+    path = parsed.path or ""
+    # Replace / and _ and - with spaces, remove file extensions
+    cleaned = f"{domain} {path}".lower()
+    cleaned = re.sub(r'[/\-_.]', ' ', cleaned)
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    return cleaned
+
+
+async def _compute_embedding_scores(
+    query: str, documents: list[str], urls: list[str]
+) -> list[float]:
+    """
+    Compute embedding-based cosine similarity scores.
+
+    Returns normalized scores (0-1 range).
+    Embeddings are already normalized, so cosine similarity = dot product.
+    """
+    if not documents:
+        return []
+
+    # Add cleaned URLs to documents for richer context
+    doc_texts = []
+    for doc, url in zip(documents, urls):
+        cleaned_url = _clean_url_for_scoring(url)
+        combined = f"{doc} {cleaned_url}" if cleaned_url else doc
+        doc_texts.append(combined)
+
+    # Get embeddings
+    embed_service = LocalEmbeddingService()
+    query_embedding = await embed_service.embed_text(query)
+    doc_embeddings = await embed_service.embed_texts(doc_texts)
+
+    if not query_embedding or not doc_embeddings:
+        return [0.0] * len(documents)
+
+    # Compute cosine similarity (dot product since normalized)
+    scores = []
+    for doc_emb in doc_embeddings:
+        similarity = sum(q * d for q, d in zip(query_embedding, doc_emb))
+        scores.append(float(similarity))
 
     # Normalize to 0-1 range
     max_score = max(scores) if scores else 1
@@ -70,36 +133,46 @@ class URLSelector:
         query: str,
         max_urls: int = 8,
     ) -> list[str]:
-        """Select the top URLs to scrape based on relevance scores."""
-        query_terms, quoted_phrases = self._query_terms(query)
-        is_chain = self._is_chain_like_query(query)
-        entity_hints = self._derive_entity_hints(search_results) if is_chain else []
-
+        """Select the top URLs to scrape based on BM25 + embedding relevance scores."""
         # Extract year from query for special handling
         query_year = self._extract_year_from_query(query)
 
-        # Relation-aware retrieval for chain queries
-        chain_components = self._extract_chain_components(query) if is_chain else {}
-        primary_entity = chain_components.get("primary", "")
+        # Prepare documents with cleaned URLs for BM25
+        doc_texts = []
+        urls = []
+        for r in search_results:
+            title = r.get("title", "")
+            content = r.get("content", "")
+            url = r.get("url", "")
+            urls.append(url)
+            # Include cleaned URL in document text for better BM25 matching
+            cleaned_url = _clean_url_for_scoring(url)
+            doc_texts.append(f"{title} {content} {cleaned_url}")
 
-        # Pre-compute BM25 scores for all documents
-        # Combine title + snippet for BM25 scoring
-        doc_texts = [
-            f"{r.get('title', '')} {r.get('content', '')}"
-            for r in search_results
-        ]
+        # Compute BM25 scores
         bm25_scores = _compute_bm25_scores(query, doc_texts)
+
+        # Compute embedding scores (async)
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If already in async context, create a new task
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(
+                        asyncio.run,
+                        _compute_embedding_scores(query, doc_texts, urls)
+                    )
+                    embedding_scores = future.result(timeout=30)
+            else:
+                embedding_scores = asyncio.run(_compute_embedding_scores(query, doc_texts, urls))
+        except Exception:
+            embedding_scores = [0.0] * len(search_results)
 
         # Deduplicate by URL, keep highest rank score.
         ranked_by_url: dict[str, float] = {}
-        overlap_by_url: dict[str, int] = {}
         for idx, r in enumerate(search_results):
             url = r.get("url", "")
-            raw_score = r.get("score", 0.0)
-            try:
-                base_score = float(raw_score)
-            except (TypeError, ValueError):
-                base_score = 0.0
             if url and web_utils.is_valid_url(url):
                 domain = web_utils.extract_domain(url).lower()
                 if domain in self.NOISY_DOMAINS:
@@ -107,96 +180,30 @@ class URLSelector:
 
                 title = str(r.get("title", "") or "").lower()
                 snippet = str(r.get("content", "") or "").lower()
-                url_lower = url.lower()
+                lowered_url = url.lower()
 
-                title_overlap = 0
-                url_overlap = 0
-                snippet_overlap = 0
-                if query_terms:
-                    title_overlap = sum(1 for term in query_terms if term in title)
-                    url_overlap = sum(1 for term in query_terms if term in url_lower)
-                    snippet_overlap = sum(1 for term in query_terms if term in snippet)
-
-                token_overlap = title_overlap + url_overlap + (0.25 * snippet_overlap)
-
-                phrase_overlap = 0.0
-                if quoted_phrases:
-                    phrase_overlap = float(
-                        sum(1 for phrase in quoted_phrases if phrase in title or phrase in url_lower)
-                    ) + (
-                        0.25 * float(sum(1 for phrase in quoted_phrases if phrase in snippet))
-                    )
-                entity_overlap = 0
-                if entity_hints:
-                    entity_overlap = sum(
-                        1 for hint in entity_hints if hint in title or hint in url_lower or hint in snippet
-                    )
-
-                # Get BM25 score for this document
+                # Get BM25 and embedding scores
                 bm25_score = bm25_scores[idx] if idx < len(bm25_scores) else 0.0
+                embedding_score = embedding_scores[idx] if idx < len(embedding_scores) else 0.0
 
-                rank_score = (
-                    base_score
-                    + (token_overlap * 0.24)
-                    + (phrase_overlap * 0.75)
-                    + (entity_overlap * 0.35)
-                    + (bm25_score * 0.5)  # BM25 contribution
-                )
+                # Base score: BM25 + embedding
+                rank_score = (bm25_score * 0.50) + (embedding_score * 0.50)
 
-                # Year-based boost: if query contains a specific year, prioritize URLs with that year
+                # Year-based boost
                 if query_year:
                     url_year_match = f"/{query_year}/" in lowered_url or f"_{query_year}" in lowered_url
                     if url_year_match:
-                        rank_score += 1.5  # Strong boost for year match
-                    # Also check if title or snippet mentions the year
+                        rank_score += 1.5
                     if query_year in title or query_year in snippet:
                         rank_score += 0.5
 
-                if "/list_of_" in lowered_url and token_overlap <= 2:
-                    rank_score -= 1.0
-                if "/list_of_people_" in lowered_url:
-                    rank_score -= 1.0
-                if "how-to-get-a-wikipedia-page" in lowered_url and token_overlap <= 2:
-                    rank_score -= 1.0
-                if domain in {"bandzoogle.com", "diymusician.cdbaby.com"} and token_overlap <= 2:
-                    rank_score -= 0.8
-
-                # Relation-aware retrieval: penalize off-branch clusters for chain queries
-                if chain_components and primary_entity:
-                    all_candidates = chain_components.get("all_candidates", [])
-                    matches_candidate = any(
-                        cand in title or cand in url_lower
-                        for cand in all_candidates if cand
-                    )
-                    matches_primary = primary_entity in title or primary_entity in url_lower
-
-                    if all_candidates:
-                        other_candidates = [c for c in all_candidates if c != primary_entity]
-                        matches_others = any(
-                            cand in title or cand in url_lower
-                            for cand in other_candidates if cand
-                        )
-                        if matches_others and not matches_primary and token_overlap < 2:
-                            rank_score -= 0.6
-                            rank_score -= 0.5
-
-                # Promote canonical pages
-                if "wikipedia.org" in domain and token_overlap >= 2:
+                # Wikipedia domain boost
+                if "wikipedia.org" in domain:
                     rank_score += 0.4
-
-                if "wikipedia.org/wiki/" in lowered_url:
-                    if any(
-                        marker in lowered_url
-                        for marker in ("_(musician)", "_(band)", "_(artist)", "_(drummer)")
-                    ):
-                        rank_score += 0.45
-                    if "/list_of_" in lowered_url:
-                        rank_score -= 0.8
 
                 prev_score = ranked_by_url.get(url)
                 if prev_score is None or rank_score > prev_score:
                     ranked_by_url[url] = rank_score
-                    overlap_by_url[url] = int(token_overlap)
 
         # Sort by rank score descending
         sorted_urls = sorted(ranked_by_url.items(), key=lambda x: x[1], reverse=True)
@@ -221,19 +228,10 @@ class URLSelector:
                     selected.append(url)
 
         # Ensure Wikipedia representation
-        priority_wiki = [
-            url
-            for url, _ in sorted_urls
-            if "wikipedia.org/wiki/" in url.lower()
-            and any(
-                marker in url.lower()
-                for marker in ("_(musician)", "_(band)", "_(artist)", "_(drummer)")
-            )
-        ]
         wiki_candidates = [
             url for url, _ in sorted_urls if "wikipedia.org" in web_utils.extract_domain(url)
         ]
-        for wiki_url in (priority_wiki + wiki_candidates)[:2]:
+        for wiki_url in wiki_candidates[:2]:
             if wiki_url in selected:
                 continue
             if len(selected) < max_urls:
@@ -244,16 +242,6 @@ class URLSelector:
                 if "wikipedia.org" not in web_utils.extract_domain(selected[idx]):
                     selected[idx] = wiki_url
                     break
-
-        # Guarantee high-overlap URLs when query terms available
-        if query_terms:
-            overlap_sorted = sorted(
-                overlap_by_url.items(), key=lambda x: x[1], reverse=True
-            )
-            for url, overlap_count in overlap_sorted:
-                if overlap_count >= 2 and url not in selected:
-                    if len(selected) < max_urls:
-                        selected.append(url)
 
         return selected
 
@@ -389,6 +377,18 @@ class URLSelector:
             "email facebook",
         )
         return any(frag in lowered for frag in generic_fragments)
+
+    @staticmethod
+    def _extract_year_from_query(query: str) -> str | None:
+        """Extract a 4-digit year from the query if present."""
+        if not query:
+            return None
+        # Look for years between 1990 and 2030
+        matches = re.findall(r'\b(19[9]\d|20[0-2]\d)\b', query)
+        if matches:
+            # Return the first year found (most specific to the query)
+            return matches[0]
+        return None
 
     @staticmethod
     def _extract_title_case_phrases(text: str) -> list[str]:

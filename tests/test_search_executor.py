@@ -6,7 +6,7 @@ import pytest
 
 from app.services import search_executor
 from app.tools.search_provider import SearchResponse
-from app.tools.tavily_search import SearchResult
+from app.tools.jina_search import SearchResult
 
 
 def test_build_step_queries_adds_canonical_and_timeline_variants():
@@ -77,7 +77,7 @@ async def test_run_deterministic_searches_emits_step_events():
                     score=0.9,
                 )
             ],
-            provider="brave",
+            provider="jina",
         )
 
     with (

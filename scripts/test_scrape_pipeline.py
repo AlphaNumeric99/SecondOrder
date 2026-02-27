@@ -68,7 +68,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--provider",
         default="",
-        help="Override scrape provider (firecrawl|playwright|jina_reader|auto).",
+        help="Override scrape provider (jina).",
     )
     parser.add_argument(
         "--render-mode",
@@ -191,9 +191,7 @@ async def _run(args: argparse.Namespace) -> int:
         scrape_service = ScrapeService(
             retry_max=int(settings.scrape_retry_max),
             provider=provider,
-            firecrawl_base_url=str(settings.firecrawl_base_url),
-            firecrawl_api_key=str(settings.firecrawl_api_key),
-            jina_reader_base_url=str(settings.jina_reader_base_url),
+            jina_api_key=str(settings.jina_api_key),
         )
         request = ScrapeRequest(
             url=target_url,
