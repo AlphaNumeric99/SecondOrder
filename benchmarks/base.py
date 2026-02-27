@@ -1,4 +1,5 @@
 """Base benchmark framework for evaluating SecondOrder's research quality."""
+
 from __future__ import annotations
 
 import json
@@ -16,14 +17,14 @@ class BenchmarkTask:
     id: str
     query: str
     domain: str
-    reference: str  # Gold answer or rubric JSON
+    reference: str
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class EvalResult:
     task_id: str
-    score: float  # 0.0 - 1.0 normalized
+    score: float
     details: dict[str, Any] = field(default_factory=dict)
     response: str = ""
     elapsed_seconds: float = 0.0
@@ -48,7 +49,9 @@ class BenchmarkReport:
             "total_tasks": self.total_tasks,
             "completed_tasks": self.completed_tasks,
             "avg_score": round(self.avg_score, 4),
-            "scores_by_domain": {k: round(v, 4) for k, v in self.scores_by_domain.items()},
+            "scores_by_domain": {
+                k: round(v, 4) for k, v in self.scores_by_domain.items()
+            },
             "results": [
                 {
                     "task_id": r.task_id,
@@ -70,16 +73,16 @@ class BenchmarkReport:
         return path
 
     def print_summary(self) -> None:
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"  {self.benchmark_name} Benchmark Results")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
         print(f"  Model:     {self.model}")
         print(f"  Tasks:     {self.completed_tasks}/{self.total_tasks}")
         print(f"  Avg Score: {self.avg_score:.1%}")
         print(f"\n  Scores by Domain:")
         for domain, score in sorted(self.scores_by_domain.items(), key=lambda x: -x[1]):
             print(f"    {domain:30s} {score:.1%}")
-        print(f"{'='*60}\n")
+        print(f"{'=' * 60}\n")
 
 
 class Benchmark(ABC):
@@ -104,7 +107,7 @@ class Benchmark(ABC):
         output_dir: str = "benchmarks/results",
     ) -> BenchmarkReport:
         """Run the full benchmark: load tasks, generate responses, evaluate."""
-        from app.agents.orchestrator import ResearchOrchestrator
+        from app.agents.parallel_orchestrator import ParallelAgentOrchestrator
         from app.llm_client import get_model
 
         resolved_model = model or get_model()
@@ -112,40 +115,43 @@ class Benchmark(ABC):
         tasks = await self.load_tasks(limit=limit)
         results: list[EvalResult] = []
 
-        print(f"\nRunning {self.name} benchmark ({len(tasks)} tasks, model={resolved_model})")
+        print(
+            f"\nRunning {self.name} benchmark ({len(tasks)} tasks, model={resolved_model})"
+        )
 
         for i, task in enumerate(tasks):
-            print(f"  [{i+1}/{len(tasks)}] {task.domain}: {task.query[:80]}...")
+            print(f"  [{i + 1}/{len(tasks)}] {task.domain}: {task.query[:80]}...")
 
-            # Run research
             start = time.time()
-            orchestrator = ResearchOrchestrator(model=resolved_model)
-            report_text = ""
+            orchestrator = ParallelAgentOrchestrator(model=resolved_model)
+            final_answer = ""
 
             try:
-                async for event in orchestrator.research(task.query):
-                    if event.event.value == "research_complete":
-                        report_text = event.data.get("report", "")
-                    elif event.event.value == "synthesis_progress":
-                        report_text += event.data.get("chunk", "")
+                async for event in orchestrator.run(task.query):
+                    if event.event.value == "message":
+                        data = event.data
+                        if data.get("type") == "final":
+                            final_answer = data.get("content", "")
             except Exception as e:
                 print(f"    ERROR: {e}")
-                results.append(EvalResult(
-                    task_id=task.id, score=0.0,
-                    details={"error": str(e)}, elapsed_seconds=time.time() - start,
-                ))
+                results.append(
+                    EvalResult(
+                        task_id=task.id,
+                        score=0.0,
+                        details={"error": str(e)},
+                        elapsed_seconds=time.time() - start,
+                    )
+                )
                 continue
 
             elapsed = time.time() - start
 
-            # Evaluate
-            result = await self.evaluate(task, report_text)
+            result = await self.evaluate(task, final_answer)
             result.elapsed_seconds = elapsed
-            result.response = report_text[:500]  # Truncate for storage
+            result.response = final_answer[:500]
             results.append(result)
             print(f"    Score: {result.score:.1%} ({elapsed:.1f}s)")
 
-        # Aggregate
         scores_by_domain: dict[str, list[float]] = {}
         for task, result in zip(tasks[: len(results)], results):
             scores_by_domain.setdefault(task.domain, []).append(result.score)
