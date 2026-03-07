@@ -76,7 +76,7 @@ Check [openrouter.io/models](https://openrouter.io/models) for the full list and
 ```bash
 cp .env.example .env          # Fill in your API keys
 uv pip install -e ".[dev]"
-.venv/Scripts/python.exe -m uvicorn app.main:app --reload
+uv run uvicorn app.main:app --reload
 ```
 
 ## Benchmarks
@@ -90,9 +90,9 @@ SecondOrder is evaluated against three industry-standard deep research benchmark
 | **DeepSearchQA** | Google DeepMind | 900 | Factual answer extraction (F1 score) |
 
 ```bash
-.venv/Scripts/python.exe -m benchmarks.run draco --limit 5
-.venv/Scripts/python.exe -m benchmarks.run deepsearchqa --limit 10
-.venv/Scripts/python.exe -m benchmarks.run all --limit 3
+uv run python -m benchmarks.run draco --limit 5
+uv run python -m benchmarks.run deepsearchqa --limit 10
+uv run python -m benchmarks.run all --limit 3
 ```
 
 ## License
