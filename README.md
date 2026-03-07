@@ -37,8 +37,6 @@ Every step streams progress to the UI — you see the plan form, searches execut
 ## Architecture
 
 - **Backend**: Python + FastAPI, raw asyncio orchestration with OpenRouter (OpenAI-compatible SDK client)
-- **Frontend**: Next.js 16, React 19, Tailwind CSS 4
-- **Database**: Supabase (PostgreSQL) for sessions, messages, research steps, and LLM call logging
 - **Search**: Jina AI Search
 - **Scraping**: Jina AI Reader
 - **Models**: OpenRouter model IDs (user-selectable, e.g., GPT, Gemini, Llama families)
@@ -49,17 +47,15 @@ No agent frameworks. No LangChain. No LlamaIndex. Just Python, asyncio, and Open
 
 ### Prerequisites
 
-- Python 3.11+ (with uv)
-- Node.js 18+
-- API keys: OpenRouter
-- Supabase project
+- Python 3.12+ (with uv)
+- API keys: OpenRouter, Jina AI
 
 ### LLM Configuration (OpenRouter)
 
 SecondOrder is OpenRouter-only. Configure your key and default model:
 
 ```bash
-# backend/.env
+# .env
 OPENROUTER_API_KEY=sk-or-...
 DEFAULT_MODEL=openai/gpt-4o-mini
 JINA_API_KEY=jina_...                 # Jina AI API key
@@ -78,24 +74,10 @@ Check [openrouter.io/models](https://openrouter.io/models) for the full list and
 ### Backend
 
 ```bash
-cd backend
 cp .env.example .env          # Fill in your API keys
 uv pip install -e ".[dev]"
 .venv/Scripts/python.exe -m uvicorn app.main:app --reload
 ```
-
-### Frontend
-
-```bash
-cd frontend
-cp .env.local.example .env.local  # Set backend URL
-npm install
-npm run dev
-```
-
-### Database
-
-Run the SQL migrations in `supabase/migrations/` against your Supabase project.
 
 ## Benchmarks
 
@@ -108,7 +90,6 @@ SecondOrder is evaluated against three industry-standard deep research benchmark
 | **DeepSearchQA** | Google DeepMind | 900 | Factual answer extraction (F1 score) |
 
 ```bash
-cd backend
 .venv/Scripts/python.exe -m benchmarks.run draco --limit 5
 .venv/Scripts/python.exe -m benchmarks.run deepsearchqa --limit 10
 .venv/Scripts/python.exe -m benchmarks.run all --limit 3
