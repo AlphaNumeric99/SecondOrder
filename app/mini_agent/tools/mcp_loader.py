@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from loguru import logger
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
@@ -73,6 +74,10 @@ class MCPTool(Tool):
     async def execute(self, **kwargs) -> ToolResult:
         timeout = self._execute_timeout or _default_timeout_config.execute_timeout
 
+        logger.info(f"[MCP] Calling tool: {self._name}")
+        if kwargs:
+            logger.info(f"[MCP] Arguments: {kwargs}")
+
         try:
             async with asyncio.timeout(timeout):
                 result = await self._session.call_tool(self._name, arguments=kwargs)
@@ -87,6 +92,11 @@ class MCPTool(Tool):
             content_str = "\n".join(content_parts)
             is_error = result.isError if hasattr(result, "isError") else False
 
+            if self._name in ("navigate", "goto", "browser_navigate"):
+                logger.info(
+                    f"[MCP] Navigated to: {kwargs.get('url', kwargs.get('href', 'unknown'))}"
+                )
+
             return ToolResult(
                 success=not is_error,
                 content=content_str,
@@ -94,12 +104,14 @@ class MCPTool(Tool):
             )
 
         except TimeoutError:
+            logger.warning(f"[MCP] Tool timed out: {self._name}")
             return ToolResult(
                 success=False,
                 content="",
                 error=f"MCP tool execution timed out after {timeout}s.",
             )
         except Exception as e:
+            logger.error(f"[MCP] Tool failed: {self._name} - {e}")
             return ToolResult(
                 success=False, content="", error=f"MCP tool execution failed: {str(e)}"
             )
@@ -234,6 +246,8 @@ class MCPServerConnection:
         if self.exit_stack:
             try:
                 await self.exit_stack.aclose()
+            except (RuntimeError, GeneratorExit, StopAsyncIteration):
+                pass
             except Exception:
                 pass
             finally:

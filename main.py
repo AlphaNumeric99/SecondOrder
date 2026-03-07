@@ -5,8 +5,28 @@ Multi-agent research system using Mini-Agent architecture.
 
 import argparse
 import asyncio
+import re
 import sys
 from pathlib import Path
+
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+
+def strip_emoji(text: str) -> str:
+    emoji_pattern = re.compile(
+        "["
+        "\U0001f600-\U0001f64f"  # emoticons
+        "\U0001f300-\U0001f5ff"  # symbols & pictographs
+        "\U0001f680-\U0001f6ff"  # transport & map symbols
+        "\U0001f1e0-\U0001f1ff"  # flags
+        "\U00002702-\U000027b0"  # dingbats
+        "\U000024c2-\U0001f251"
+        "]+",
+        flags=re.UNICODE,
+    )
+    return emoji_pattern.sub(r"", text)
+
 
 from app.agents.parallel_orchestrator import ParallelAgentOrchestrator
 
@@ -34,6 +54,7 @@ async def run_research(
 
         elif event_type == "message":
             msg = data.get("content", "")
+            msg = strip_emoji(msg)
             if data.get("type") == "final":
                 print(f"\n\n{'=' * 50}")
                 print("FINAL ANSWER:")
@@ -43,7 +64,8 @@ async def run_research(
                 print(f"\n[*] {msg}")
 
         elif event_type == "error":
-            print(f"\n[!] Error: {data.get('message', 'Unknown error')}")
+            err_msg = strip_emoji(data.get("message", "Unknown error"))
+            print(f"\n[!] Error: {err_msg}")
 
 
 def main():
