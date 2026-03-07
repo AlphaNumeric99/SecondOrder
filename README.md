@@ -32,7 +32,7 @@ You ask a question
   Streamed to you in real time via SSE
 ```
 
-Every step streams progress to the UI — you see the plan form, searches execute, sources get scraped, and the final report writes itself token by token.
+Every step streams progress — you see the plan form, searches execute, sources get scraped, and the final report writes itself token by token.
 
 ## Architecture
 
